@@ -126,3 +126,13 @@ Khi phát hiện bất kỳ sự thay đổi nào:
 1. **Không giả định biểu đồ ẩn có thể truy cập được:** Khi người dùng chuyển tab trên FireAnt, biểu đồ cũ có thể bị hủy khỏi RAM. Extension phải lưu bản snapshot cuối cùng của biểu đồ đó vào `chrome.storage.local` trước khi chuyển sang biểu đồ mới.
 2. **Stock Registry là nguồn sự thật duy nhất (Single Source of Truth):** Danh sách cổ phiếu được quản lý phải lưu trữ trạng thái `isOpened` (đang mở trên FireAnt) và `isActive` (đang là biểu đồ hiển thị).
 3. **Bảo toàn 100% module Drawing Extractor:** Kiến trúc bóc tách hình vẽ đã được chứng minh hiệu quả qua 19 công cụ và không cần thay đổi logic lõi, chỉ cần truyền thêm `chartContext` vào snapshot.
+
+---
+
+## 7. MỐI QUAN HỆ VỚI TÍNH NĂNG XUẤT TẤT CẢ DỮ LIỆU (EXPORT ALL JSON)
+
+Trong quá trình thực hiện chức năng **Export All JSON**:
+1. **Đọc độc quyền từ Storage (Storage-Exclusive Read):** `ExportDataCollector` chỉ đọc dữ liệu từ `StorageRepository` (`chrome.storage.local`), tuyệt đối **không** gửi truy vấn hoặc can thiệp trực tiếp vào runtime DOM của FireAnt tại thời điểm xuất file.
+2. **Lý do kiến trúc:** Do FireAnt chỉ duy trì thực thể `chartWidget` của biểu đồ đang hoạt động trong RAM, việc gửi lệnh trích xuất runtime khi xuất file sẽ bỏ sót toàn bộ các mã cổ phiếu hoặc khung thời gian khác đã đóng/ẩn trước đó. Ngược lại, việc lưu trữ snapshot liên tục vào Storage đảm bảo mọi mã đã phát hiện đều có dữ liệu đầy đủ.
+3. **Tránh nghẽn tiến trình & Chạy độc lập:** Cơ chế xuất không phụ thuộc vào trạng thái tải trang của FireAnt, giúp Side Panel có thể thực hiện xuất dữ liệu ngay cả khi tab FireAnt đang reload hoặc chuyển hướng.
+

@@ -1,10 +1,10 @@
 # KẾ HOẠCH TRIỂN KHAI THEO GIAI ĐOẠN (IMPLEMENTATION PLAN)
 
 **Dự án:** Stock Chart Extractor – Multi-Stock Management Architecture  
-**Tài liệu:** Kế hoạch thực thi chi tiết chia thành 5 Sprint phát triển, kiểm thử và nghiệm thu  
-**Phiên bản:** 2.0  
-**Ngày khởi tạo:** 17/11/2026  
-**Trạng thái kiểm duyệt:** ROADMAP SPECIFICATION (Ready for Review)
+**Tài liệu:** Kế hoạch thực thi chi tiết chia thành 5 Sprint phát triển, kiểm thử, tích hợp Phân hệ Xuất JSON Toàn diện và nghiệm thu  
+**Phiên bản:** 2.1  
+**Ngày cập nhật:** 17/11/2026  
+**Trạng thái kiểm duyệt:** ROADMAP SPECIFICATION (Export All JSON Integrated)
 
 ---
 
@@ -13,9 +13,10 @@
 Toàn bộ quá trình chuyển đổi Stock Chart Extractor sang kiến trúc Multi-Stock được tổ chức thành **5 Sprint phát triển lũy tiến (Progressive Sprints)**.
 
 ### Các nguyên tắc thực thi bất biến:
-1. **Không phá vỡ chức năng đang chạy (Zero Regression):** Mỗi sprint bổ sung mã mới phải đảm bảo mã nguồn hiện tại biên dịch thành công (`npm run compile` không lỗi, `npm run build` không lỗi).
+1. **Không phá vỡ chức năng đang chạy (Zero Regression):** Mỗi sprint bổ sung mã mới phải đảm bảo mã nguồn hiện tại biên dịch thành công (`npm run compile` không lỗi, `npm run build` không lỗi, `npm test` vượt qua 100%).
 2. **Bảo tồn các Extractor cốt lõi:** Không sửa đổi thuật toán trích xuất hình học trong `src/extractors/` đã được kiểm chứng hoạt động.
 3. **Kiểm thử tại chỗ (Automated & Manual Verification):** Mỗi sprint phải có các kịch bản kiểm thử rõ ràng với tiêu chí nghiệm thu cụ thể trước khi chuyển sang sprint tiếp theo.
+4. **Quy chuẩn Xuất JSON Độc lập (Export Isolation):** Phân hệ Export All JSON chỉ tương tác thông qua `StorageRepository`, tuyệt đối không thăm dò hay làm chậm tiến trình DOM của FireAnt.
 
 ---
 
@@ -32,10 +33,10 @@ Toàn bộ quá trình chuyển đổi Stock Chart Extractor sang kiến trúc M
 - **Danh sách File cần tạo / cập nhật:**
   - `src/registry/stock-registry.types.ts` *(Mới)*
   - `src/registry/stock-registry.ts` *(Mới)*
-  - `src/messaging/message.types.ts` *(Cập nhật - bổ sung message v2)*
-  - `src/messaging/message.schemas.ts` *(Cập nhật - bổ sung Zod schemas v2)*
-  - `entrypoints/fireant-bridge.content.ts` *(Cập nhật - tích hợp Tab Detector & Active Tracker)*
-  - `entrypoints/background.ts` *(Cập nhật - xử lý lưu trữ `stockRegistry`)*
+  - `src/messaging/message.types.ts` *(Cập nhật)*
+  - `src/messaging/message.schemas.ts` *(Cập nhật)*
+  - `entrypoints/fireant-bridge.content.ts` *(Cập nhật)*
+  - `entrypoints/background.ts` *(Cập nhật)*
 - **Phụ thuộc (Dependencies):** Không phụ thuộc sprint khác.
 - **Kịch bản kiểm thử (Test Cases):**
   - *TC1.1:* Mở FireAnt với biểu đồ FPT -> Extension tự động ghi nhận mã `FPT` với `sources=['FIREANT']`, `isOpened=true`, `isActive=true`.
@@ -61,9 +62,9 @@ Toàn bộ quá trình chuyển đổi Stock Chart Extractor sang kiến trúc M
   5. Cập nhật `chartContexts` tóm tắt trong `StockRegistry` (số lượng drawings, thời điểm sync).
 - **Danh sách File cần tạo / cập nhật:**
   - `src/models/chart-snapshot.types.ts` *(Mới)*
-  - `src/storage/storage-repository.ts` *(Mới - quản lý partition keys và migration)*
-  - `entrypoints/fireant-bridge.content.ts` *(Cập nhật - gọi Drawing Extractor và đính kèm context)*
-  - `entrypoints/background.ts` *(Cập nhật - ghi snapshot phân vùng)*
+  - `src/storage/storage-repository.ts` *(Mới)*
+  - `entrypoints/fireant-bridge.content.ts` *(Cập nhật)*
+  - `entrypoints/background.ts` *(Cập nhật)*
 - **Phụ thuộc:** Hoàn thành Sprint 1.
 - **Kịch bản kiểm thử (Test Cases):**
   - *TC2.1:* Vẽ 1 đường ngang trên FPT (khung 15m), kích hoạt sync -> Storage xuất hiện key `chartSnapshots:FPT_HOSE_15` chứa đúng 1 đối tượng vẽ.
@@ -73,7 +74,7 @@ Toàn bộ quá trình chuyển đổi Stock Chart Extractor sang kiến trúc M
   - Mỗi ngữ cảnh biểu đồ lưu trữ thành công trong partition độc lập mà không đè chéo dữ liệu của nhau.
   - Quá trình trích xuất hoàn tất dưới 100ms.
 - **Rủi ro & Giới hạn:**
-  - Khi người dùng vẽ rất nhanh và chuyển mã liên tục $\rightarrow$ Giải pháp: Sử dụng `generationId` để loại bỏ các bản snapshot đến muộn (stale snapshots).
+  - Người dùng chuyển mã liên tục $\rightarrow$ Giải pháp: Sử dụng `generationId` để loại bỏ các bản snapshot đến muộn (stale snapshots).
 
 ---
 
@@ -86,9 +87,9 @@ Toàn bộ quá trình chuyển đổi Stock Chart Extractor sang kiến trúc M
   3. Đóng gói indicators vào trường `indicators` của `IsolatedChartSnapshot`.
   4. Cập nhật số lượng chỉ báo (`indicatorsCount`) vào `StockRegistry`.
 - **Danh sách File cần tạo / cập nhật:**
-  - `entrypoints/fireant-bridge.content.ts` *(Cập nhật - tích hợp IndicatorExtractor)*
-  - `src/messaging/message.schemas.ts` *(Đảm bảo schema snapshot chứa indicators)*
-  - `entrypoints/background.ts` *(Kiểm tra định tuyến và cập nhật summary)*
+  - `entrypoints/fireant-bridge.content.ts` *(Cập nhật)*
+  - `src/messaging/message.schemas.ts` *(Cập nhật)*
+  - `entrypoints/background.ts` *(Cập nhật)*
 - **Phụ thuộc:** Hoàn thành Sprint 2.
 - **Kịch bản kiểm thử (Test Cases):**
   - *TC3.1:* Thêm chỉ báo MA 20 và RSI 14 trên FPT -> Snapshot `chartSnapshots:FPT_HOSE_15` lưu trữ đủ 2 chỉ báo cùng với các nét vẽ.
@@ -100,53 +101,69 @@ Toàn bộ quá trình chuyển đổi Stock Chart Extractor sang kiến trúc M
 
 ---
 
-### SPRINT 4: GLOBAL WATCHLIST DECOUPLING & TARGET SIDE PANEL UI
-*Mục tiêu: Độc lập hóa dữ liệu Watchlist toàn cục và xây dựng giao diện Side Panel 2 khu vực.*
+### SPRINT 4: GLOBAL WATCHLIST, TARGET SIDE PANEL UI & EXPORT ALL JSON
+*Mục tiêu: Độc lập hóa dữ liệu Watchlist toàn cục, hoàn thiện giao diện Side Panel 2 khu vực và triển khai tính năng Xuất toàn bộ dữ liệu ra 1 tệp JSON duy nhất.*
 
 - **Phạm vi công việc:**
-  1. Độc lập hóa Watchlist: Trích xuất từ `localStorage.getItem('persist:watchlists')` và lưu thẳng vào key `globalWatchlist`. Tuyệt đối không sao chép vào snapshot biểu đồ.
-  2. Tái cấu trúc giao diện `entrypoints/sidepanel/index.html` và `main.ts` thành 2 khu vực:
-     - **Khu vực A (Stock Manager):** Ô nhập mã thủ công, nút thêm mã, danh sách mã quản lý, trạng thái (Active / Opened / Manual), nút xóa.
-     - **Khu vực B (Selected Stock Detail):** Tiêu đề mã và khung thời gian đang chọn, 3 Tab điều hướng:
-       - Tab 1: Drawings (Lọc theo mã và timeframe đang chọn).
-       - Tab 2: Indicators (Lọc theo mã và timeframe đang chọn).
-       - Tab 3: Watchlist (Hiển thị danh sách toàn cục, danh mục nhóm, chuyển đổi nhóm).
-  3. Cung cấp các nút: Copy Tab JSON, Export All Data JSON, và Request Sync.
+  1. **Độc lập hóa Watchlist:** Trích xuất từ `localStorage.getItem('persist:watchlists')` và lưu thẳng vào key `globalWatchlist`. Tuyệt đối không sao chép vào snapshot biểu đồ.
+  2. **Giao diện Side Panel 2 khu vực:**
+     - Khu vực A (Stock Manager): Ô nhập mã, danh sách mã, huy hiệu trạng thái (Active / Opened / Manual), nút xóa.
+     - Khu vực B (Selected Stock Detail): Tiêu đề chi tiết, 3 tab: Drawings, Indicators, Watchlist.
+  3. **Phân hệ Xuất Toàn diện (Export All JSON):**
+     - Xây dựng `Export Data Collector`: Đọc nhất quán từ `StorageRepository` (`stockRegistry`, tất cả `chartSnapshots`, `globalWatchlist`).
+     - Xây dựng `Export Serializer`: Chuyển đổi sang Envelope v1, format ISO 8601 kèm múi giờ, áp dụng bộ lọc trường an toàn (Security Allowlist Sanitization) khử trùng token, cookie, password.
+     - Xây dựng `Export Validator`: Kiểm thực cấu trúc theo `ExportAllDataEnvelopeSchema` và tính toàn vẹn tham chiếu.
+     - Xây dựng `Export Downloader`: Tạo tệp UTF-8 JSON Blob và kích hoạt tải về qua DOM `a[download]` (không cần thêm quyền Chrome).
+     - Xây dựng `Export Manager`: Điều phối quy trình và quản lý 4 trạng thái giao diện Side Panel: `Idle`, `Exporting`, `Success`, `Error`.
 - **Danh sách File cần tạo / cập nhật:**
-  - `entrypoints/sidepanel/index.html` *(Tái cấu trúc HTML 2 khu vực)*
-  - `entrypoints/sidepanel/main.ts` *(Viết lại logic render UI, quản lý state Side Panel)*
-  - `entrypoints/sidepanel/style.css` *(Bổ sung giao diện hiện đại, responsive)*
+  - `src/export/export.types.ts` *(Mới)*
+  - `src/export/export-collector.ts` *(Mới)*
+  - `src/export/export-serializer.ts` *(Mới)*
+  - `src/export/export-validator.ts` *(Mới)*
+  - `src/export/export-downloader.ts` *(Mới)*
+  - `src/export/export-manager.ts` *(Mới)*
+  - `entrypoints/sidepanel/index.html` *(Cập nhật trạng thái nút Export All JSON)*
+  - `entrypoints/sidepanel/main.ts` *(Gắn Export Manager vào sự kiện click)*
 - **Phụ thuộc:** Hoàn thành Sprint 1, 2, 3.
 - **Kịch bản kiểm thử (Test Cases):**
   - *TC4.1:* Khu vực Stock Manager hiển thị đúng danh sách các mã đang mở trên FireAnt và mã do người dùng tự nhập.
-  - *TC4.2:* Click vào mã `VIC` trong Stock Manager -> Khu vực Detail ngay lập tức tải và hiển thị Drawings và Indicators của mã `VIC`.
-  - *TC4.3:* Chuyển qua Tab Watchlist -> Hiển thị danh mục theo dõi toàn cục mà không phụ thuộc vào việc mã nào đang được chọn ở Khu vực A.
+  - *TC4.2:* Click vào mã `VIC` trong Stock Manager -> Khu vực Detail ngay lập tức hiển thị Drawings và Indicators của mã `VIC`.
+  - *TC4.3:* Chuyển qua Tab Watchlist -> Hiển thị danh mục theo dõi toàn cục mà không phụ thuộc mã nào đang chọn.
   - *TC4.4:* Bấm Copy JSON trên từng tab -> Clipboard nhận đúng cấu trúc JSON của tab đó.
+  - *TC4.5 (Export):* Bấm "Export All JSON" khi có 3 mã quản lý -> Tải về duy nhất 1 tệp có định dạng tên `stock-chart-extractor_all_YYYY-MM-DD_HH-mm-ss.json` chứa đủ 4 nhóm: `metadata`, `stockRegistry`, `chartSnapshots`, `watchlist`.
+  - *TC4.6 (Export Completeness):* Mã có biểu đồ mở nhưng chưa vẽ hình nào -> Được ghi nhận trạng thái `"EMPTY"`, không bị đánh dấu lỗi.
+  - *TC4.7 (Export Security):* Kiểm tra tệp JSON đã xuất -> Xác nhận không chứa bất kỳ token, jwt, cookie, password hay thông tin cá nhân nào của người dùng.
+  - *TC4.8 (UI States):* Khi đang xuất dữ liệu, nút bị disable hiển thị `⏳ Đang đóng gói...`; khi hoàn tất hiển thị `✓ Đã tải...` và tự reset sau 3s.
 - **Tiêu chí nghiệm thu:**
-  - Giao diện người dùng mượt mà, không giật lag.
-  - Thao tác chuyển đổi giữa các mã và các tab phản hồi tức thì (< 50ms).
+  - Tệp JSON xuất ra đúng chuẩn Envelope v1 và vượt qua Zod schema validation.
+  - Quá trình xuất diễn ra mượt mà, không giật lag giao diện, không làm treo tab FireAnt.
 - **Rủi ro & Giới hạn:**
-  - Số lượng mã theo dõi trong Watchlist quá lớn (> 500 mã) có thể làm chậm DOM render $\rightarrow$ Giải pháp: Render danh sách theo danh mục (Category filter).
+  - Dữ liệu Watchlist có kích thước lớn $\rightarrow$ Giải pháp: Tối ưu hóa chuỗi hóa JSON và giải phóng blob URL ngay sau khi click download.
 
 ---
 
-### SPRINT 5: INTEGRATION, RESILIENCE & REGRESSION TESTING
-*Mục tiêu: Kiểm thử tích hợp toàn diện, kiểm tra rò rỉ bộ nhớ, di chuyển dữ liệu cũ và đóng gói bản phát hành.*
+### SPRINT 5: INTEGRATION, RESILIENCE, EXPORT VALIDATION & REGRESSION TESTING
+*Mục tiêu: Kiểm thử tích hợp toàn diện, kiểm tra rò rỉ bộ nhớ, kiểm tra sức chịu tải của phân hệ Export và đóng gói bản phát hành.*
 
 - **Phạm vi công việc:**
   1. Kiểm thử di chuyển dữ liệu (Migration) từ các bản MVP trước đó sang schema v2.0.
   2. Kiểm thử sức chịu tải trong trường hợp chia màn hình (Multi-Chart Split View: 2 hoặc 4 biểu đồ).
-  3. Kiểm thử khả năng phục hồi khi tab FireAnt bị reload, crash hoặc đóng đột ngột.
-  4. Chạy bộ kiểm tra `npm run compile` và `npm run build` tạo gói đóng gói `.output/chrome-mv3`.
-  5. Cập nhật tài liệu hướng dẫn và báo cáo kỹ thuật.
+  3. Kiểm thử phân hệ Export với cơ sở dữ liệu lớn (> 50 mã, hàng trăm nét vẽ).
+  4. Kiểm thử khả năng phục hồi khi tab FireAnt bị reload, crash hoặc đóng đột ngột.
+  5. Chạy bộ kiểm tra tự động `npm test`, `npm run compile` và `npm run build` tạo gói đóng gói `.output/chrome-mv3`.
+  6. Cập nhật tài liệu hướng dẫn và báo cáo kỹ thuật.
 - **Danh sách File cần tạo / cập nhật:**
+  - `tests/test-export-pipeline.ts` *(Mới - Kiểm thử toàn trình Export)*
   - `docs/MIGRATION_GUIDE.md` *(Mới)*
   - `README.md` *(Cập nhật tài liệu sản phẩm)*
 - **Phụ thuộc:** Hoàn thành toàn bộ Sprint 1 - 4.
 - **Kịch bản kiểm thử (Test Cases):**
   - *TC5.1:* Mở layout 4 biểu đồ trên FireAnt (`FPT`, `VIC`, `MWG`, `VCB`) -> Extension phát hiện chính xác cả 4 biểu đồ và xác định đúng Active Chart.
-  - *TC5.2:* Tắt trình duyệt, mở lại -> Dữ liệu lưu trong Chrome Local Storage vẫn toàn vẹn, Side Panel hiển thị ngay lập tức danh bạ mã và các snapshot đã lưu.
+  - *TC5.2:* Tắt trình duyệt, mở lại -> Dữ liệu lưu trong Chrome Local Storage vẫn toàn vẹn.
   - *TC5.3:* Kiểm tra kích thước RAM của Side Panel sau 1 giờ hoạt động liên tục -> Không có rò rỉ bộ nhớ (Memory Leak < 50MB).
+  - *TC5.4 (Export Stress):* Kiểm thử xuất kho dữ liệu lớn gồm 50 mã và 500 hình vẽ -> Thời gian đóng gói và sinh tệp < 500ms, bộ nhớ RAM Side Panel tăng không quá 20MB.
+  - *TC5.5 (Logical Snapshot Consistency):* Kích hoạt Export trong lúc tab FireAnt đang vẽ nét mới -> Bản snapshot xuất ra vẫn bảo toàn tính toàn vẹn logic điểm thời gian (Point-in-Time Consistency).
+  - *TC5.6 (Export Resilience):* Mô phỏng dữ liệu snapshot bị hỏng khóa -> Export Validator phát hiện lỗi, hiển thị thông báo lỗi trên UI và không tải về tệp rác.
 - **Tiêu chí nghiệm thu:**
   - 100% test case đạt yêu cầu (Pass).
   - Bản build độc lập chạy ổn định trên Google Chrome MV3.

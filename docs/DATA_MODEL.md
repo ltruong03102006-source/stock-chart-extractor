@@ -1,16 +1,16 @@
 # MÔ HÌNH DỮ LIỆU ĐA MÃ CỔ PHIẾU (MULTI-STOCK DATA MODEL)
 
 **Dự án:** Stock Chart Extractor – Multi-Stock Management Architecture  
-**Tài liệu:** Đặc tả mô hình dữ liệu TypeScript, lược đồ kiểm thực Zod, phân vùng lưu trữ Chrome Storage và chiến lược Migration  
-**Phiên bản:** 2.0  
-**Ngày khởi tạo:** 17/11/2026  
-**Trạng thái kiểm duyệt:** DATA SPECIFICATION (Ready for Review)
+**Tài liệu:** Đặc tả mô hình dữ liệu TypeScript, lược đồ kiểm thực Zod, phân vùng lưu trữ Chrome Storage, chiến lược Migration và Mô hình Xuất JSON Toàn diện (Export All JSON)  
+**Phiên bản:** 2.1  
+**Ngày cập nhật:** 17/11/2026  
+**Trạng thái kiểm duyệt:** DATA SPECIFICATION (Export All JSON Schema Integrated)
 
 ---
 
 ## 1. NGUYÊN TẮC THIẾT KẾ MÔ HÌNH DỮ LIỆU
 
-Hệ thống dữ liệu của Stock Chart Extractor 2.0 được xây dựng dựa trên 3 nguyên tắc phân rã bắt buộc:
+Hệ thống dữ liệu của Stock Chart Extractor 2.1 được xây dựng dựa trên 4 nguyên tắc phân rã bắt buộc:
 
 1. **Phân vùng độc lập theo Ngữ cảnh Biểu đồ (Per-Stock Context Isolation):**
    - Các đối tượng vẽ (Drawings) và chỉ báo kỹ thuật (Indicators) gắn liền với một biểu đồ cụ thể, được định danh bằng bộ ba `symbol + exchange + timeframe`.
@@ -20,6 +20,9 @@ Hệ thống dữ liệu của Stock Chart Extractor 2.0 được xây dựng d�
    - Watchlist được lưu trữ độc lập ở khóa toàn cục; **tuyệt đối không nhân bản hoặc sao chép Watchlist vào từng bản ghi Chart Snapshot**.
 3. **Trung tâm quản lý mã duy nhất (Unified Registry Single-Source-of-Truth):**
    - Mọi mã cổ phiếu (phát hiện từ FireAnt hay người dùng thêm thủ công) được định tuyến và quản lý tập trung thông qua `StockRegistry`.
+4. **Tính độc lập của Chuẩn tệp Xuất (Export Schema Decoupling):**
+   - Chuẩn tệp xuất ra tệp JSON (`ExportJsonEnvelope`, `schemaVersion: 1`) được thiết kế độc lập với cấu trúc phân vùng khóa trong `chrome.storage.local`.
+   - Các thay đổi cấu trúc lưu trữ nội bộ trong tương lai sẽ không phá vỡ khả năng tương thích của các tệp JSON đã xuất của người dùng.
 
 ---
 
@@ -48,7 +51,7 @@ export interface ChartContextId {
 /** Hàm tiện ích tạo Composite Key chuẩn hóa */
 export function buildChartCompositeKey(symbol: string, timeframe: string, exchange?: string): string {
   const cleanSymbol = symbol.trim().toUpperCase();
-  const cleanTimeframe = timeframe.trim();
+  const cleanTimeframe = timeframe.trim().toUpperCase();
   const cleanExchange = exchange ? exchange.trim().toUpperCase() : 'VN';
   return `${cleanSymbol}_${cleanExchange}_${cleanTimeframe}`;
 }
@@ -70,50 +73,56 @@ export type DrawingType =
 
 export interface DrawingPoint {
   /** Thời gian của điểm (Unix timestamp ms) */
-  time: number;
+  time?: number;
+  /** Chỉ số nến (Bar index) */
+  index?: number;
   /** Mức giá tại điểm */
   price: number;
 }
 
 export interface DrawingStyle {
+  linecolor?: string;
   color?: string;
-  lineWidth?: number;
-  lineStyle?: number; // 0: solid, 1: dotted, 2: dashed
+  linewidth?: number;
+  linestyle?: number; // 0: solid, 1: dotted, 2: dashed
+  backgroundColor?: string;
   fillColor?: string;
   transparency?: number;
 }
 
 export interface DrawingItem {
   id: string;
-  type: DrawingType;
-  title: string;
+  type: DrawingType | string;
+  name: string;
   points: DrawingPoint[];
   properties: Record<string, unknown>;
   style: DrawingStyle;
-  extractedAt: number;
+  visible: boolean;
+  locked: boolean;
+  updatedAt: number;
 }
 ```
 
 ### 2.3. Mô hình Chỉ báo Kỹ thuật (Technical Indicator Entities)
 
 ```typescript
-export interface IndicatorPlot {
-  id: string;
-  title: string;
-  type: string; // 'line', 'histogram', 'arrows'
-  color?: string;
-}
-
 export interface IndicatorItem {
   id: string;
   name: string;
+  type: string;
   shortName: string;
-  description: string;
   inputs: Record<string, unknown>;
-  plots: IndicatorPlot[];
-  styles: Record<string, unknown>;
-  isVisible: boolean;
-  extractedAt: number;
+  style: Record<string, unknown>;
+  pane: {
+    type: 'main' | 'separate';
+  };
+  values?: {
+    latest: number | Record<string, number> | null;
+  };
+  metadata: {
+    source: 'fireant';
+    extractionStatus: 'VERIFIED' | 'PARTIALLY VERIFIED' | 'NOT AVAILABLE';
+  };
 }
 ```
 
@@ -121,16 +130,16 @@ export interface IndicatorItem {
 
 ```typescript
 export interface IsolatedChartSnapshot {
-  /** Phiên bản schema snapshot */
+  /** Phiên bản schema snapshot nội bộ */
   version: '2.0';
 
   /** Thông tin định danh ngữ cảnh của snapshot */
   context: ChartContextId;
 
-  /** Khóa phức hợp (trùng với context.compositeKey để tra cứu nhanh) */
+  /** Khóa phức hợp: symbol_exchange_timeframe */
   compositeKey: string;
 
-  /** Mã thế hệ (Generation ID) ngăn ngừa race condition ghi đè dữ liệu cũ */
+  /** Mã thế hệ (Generation ID) ngăn ngừa race condition */
   generationId: number;
 
   /** Danh sách các đối tượng vẽ trích xuất được */
@@ -153,27 +162,38 @@ export interface IsolatedChartSnapshot {
 ### 2.5. Mô hình Dữ liệu Danh mục Theo dõi Toàn cục (Global Watchlist Snapshot)
 
 ```typescript
-export interface WatchlistStockItem {
+export interface WatchlistItem {
+  id: string;
   symbol: string;
+  name?: string;
   exchange?: string;
-  companyName?: string;
-  note?: string;
+  price?: number | null;
+  referencePrice?: number | null;
+  change?: number | null;
+  changePercent?: number | null;
+  volume?: number | null;
+  position: number;
+  metadata: {
+    source: 'fireant';
+    extractionStatus: 'VERIFIED' | 'PARTIALLY VERIFIED';
+  };
 }
 
-export interface WatchlistCategory {
+export interface WatchlistGroup {
   id: string;
   name: string;
-  order: number;
-  symbols: string[];
+  isDefault: boolean;
+  displayIndex: number;
+  totalSymbols: number;
+  items: WatchlistItem[];
 }
 
 export interface GlobalWatchlistSnapshot {
-  version: '2.0';
-  activeCategoryId: string | null;
-  categories: WatchlistCategory[];
-  stocks: Record<string, WatchlistStockItem>;
-  totalStocksCount: number;
-  lastSyncedAt: number;
+  activeWatchlistId: string;
+  totalWatchlists: number;
+  watchlists: WatchlistGroup[];
+  activeItems: WatchlistItem[];
+  timestamp: number;
 }
 ```
 
@@ -215,89 +235,85 @@ export interface StockRegistryState {
 
 ## 3. LƯỢC ĐỒ KIỂM THỰC RUNTIME (ZOD SCHEMAS)
 
-Để đảm bảo tính an toàn kiểu (Type-Safety) tuyệt đối khi truyền dữ liệu qua `window.postMessage` và `chrome.runtime.sendMessage`, tất cả gói tin được kiểm chứng qua Zod:
-
 ```typescript
 import { z } from 'zod';
 
-export const ChartContextIdSchema = z.object({
+export const ChartContextPayloadSchema = z.object({
   symbol: z.string().min(1),
   exchange: z.string().optional(),
-  timeframe: z.string().min(1),
-  chartId: z.string(),
+  timeframe: z.string().default('D'),
+  chartId: z.string().default('chart-0'),
   compositeKey: z.string(),
+  chartsCount: z.number().optional(),
 });
 
 export const DrawingPointSchema = z.object({
-  time: z.number(),
+  index: z.number().optional(),
   price: z.number(),
+  time: z.number().optional(),
 });
 
-export const DrawingItemSchema = z.object({
+export const DrawingObjectSchema = z.object({
   id: z.string(),
+  platformId: z.string().optional(),
   type: z.string(),
-  title: z.string(),
+  name: z.string(),
   points: z.array(DrawingPointSchema),
-  properties: z.record(z.unknown()),
-  style: z.record(z.unknown()),
-  extractedAt: z.number(),
+  properties: z.record(z.string(), z.unknown()).default({}),
+  style: z.record(z.string(), z.unknown()).default({}),
+  visible: z.boolean().default(true),
+  locked: z.boolean().default(false),
+  updatedAt: z.number().default(() => Date.now()),
 });
 
 export const IndicatorItemSchema = z.object({
   id: z.string(),
   name: z.string(),
+  type: z.string(),
   shortName: z.string(),
-  description: z.string().default(''),
-  inputs: z.record(z.unknown()),
-  plots: z.array(z.any()),
-  styles: z.record(z.unknown()),
-  isVisible: z.boolean().default(true),
-  extractedAt: z.number(),
+  inputs: z.record(z.string(), z.unknown()).default({}),
+  style: z.record(z.string(), z.unknown()).default({}),
+  pane: z.object({
+    type: z.enum(['main', 'separate']),
+  }),
+  values: z.object({
+    latest: z.union([z.number(), z.record(z.string(), z.number())]).nullable().default(null),
+  }).default({ latest: null }),
+  metadata: z.object({
+    source: z.literal('fireant').default('fireant'),
+    extractionStatus: z.enum(['VERIFIED', 'PARTIALLY VERIFIED', 'NOT AVAILABLE']).default('VERIFIED'),
+  }),
 });
 
 export const IsolatedChartSnapshotSchema = z.object({
-  version: z.literal('2.0'),
-  context: ChartContextIdSchema,
+  version: z.literal('2.0').default('2.0'),
+  context: ChartContextPayloadSchema,
   compositeKey: z.string(),
-  generationId: z.number(),
-  drawings: z.array(DrawingItemSchema),
-  indicators: z.array(IndicatorItemSchema),
-  drawingsCount: z.number().int().nonnegative(),
-  indicatorsCount: z.number().int().nonnegative(),
-  extractedAt: z.number(),
-});
-
-export const GlobalWatchlistSnapshotSchema = z.object({
-  version: z.literal('2.0'),
-  activeCategoryId: z.string().nullable(),
-  categories: z.array(z.object({
-    id: z.string(),
-    name: z.string(),
-    order: z.number(),
-    symbols: z.array(z.string()),
-  })),
-  stocks: z.record(z.any()),
-  totalStocksCount: z.number().int().nonnegative(),
-  lastSyncedAt: z.number(),
+  generationId: z.number().default(0),
+  drawings: z.array(DrawingObjectSchema).default([]),
+  indicators: z.array(IndicatorItemSchema).default([]),
+  drawingsCount: z.number().default(0),
+  indicatorsCount: z.number().default(0),
+  extractedAt: z.number().default(() => Date.now()),
 });
 
 export const StockRegistryItemSchema = z.object({
   symbol: z.string().min(1),
   exchange: z.string().optional(),
   sources: z.array(z.enum(['FIREANT', 'EXTENSION'])),
-  isOpened: z.boolean(),
-  isActive: z.boolean(),
-  chartContexts: z.array(z.any()),
-  lastDetectedAt: z.number(),
-  createdAt: z.number(),
+  isOpened: z.boolean().default(false),
+  isActive: z.boolean().default(false),
+  chartContexts: z.array(z.any()).default([]),
+  lastDetectedAt: z.number().default(() => Date.now()),
+  createdAt: z.number().default(() => Date.now()),
 });
 
 export const StockRegistryStateSchema = z.object({
-  version: z.literal('2.0'),
-  activeSymbol: z.string().nullable(),
-  activeCompositeKey: z.string().nullable(),
-  items: z.record(StockRegistryItemSchema),
-  updatedAt: z.number(),
+  version: z.literal('2.0').default('2.0'),
+  activeSymbol: z.string().nullable().default(null),
+  activeCompositeKey: z.string().nullable().default(null),
+  items: z.record(z.string(), StockRegistryItemSchema).default({}),
+  updatedAt: z.number().default(() => Date.now()),
 });
 ```
 
@@ -328,15 +344,7 @@ Bộ nhớ `chrome.storage.local` được phân vùng bằng các tiền tố r
 | -> Giá trị: GlobalWatchlistSnapshot                                     |
 | (Danh sách theo dõi toàn cục độc lập)                                   |
 +-------------------------------------------------------------------------+
-| [Khóa] "appSettings"                                                    |
-| -> Giá trị: { autoSync: boolean, syncIntervalMs: number, theme: string } |
-+-------------------------------------------------------------------------+
 ```
-
-### Lợi ích của kiến trúc phân vùng này:
-1. **Tránh nghẽn IO:** Khi cập nhật dữ liệu của mã `FPT`, Side Panel chỉ đọc/ghi key `"chartSnapshots:FPT_HOSE_15"`, không cần serialize lại toàn bộ database.
-2. **Lắng nghe sự kiện chi tiết:** `chrome.storage.onChanged` chỉ kích hoạt cho đúng khóa bị thay đổi, giúp UI cập nhật tức thì với hiệu năng tối ưu.
-3. **Dễ dàng giải phóng bộ nhớ (Quota Management):** Khi người dùng xóa mã hoặc vượt giới hạn dung lượng, chỉ cần xóa bỏ chính xác key snapshot tương ứng.
 
 ---
 
@@ -345,150 +353,230 @@ Bộ nhớ `chrome.storage.local` được phân vùng bằng các tiền tố r
 Module `DataNormalizer` thi hành các quy chuẩn bắt buộc:
 
 1. **Chuẩn hóa Mã cổ phiếu (`Symbol`):**
-   - Loại bỏ khoảng trắng đầu/cuối.
-   - Chuyển thành chữ in hoa toàn bộ.
-   - Loại bỏ ký tự đặc biệt không hợp lệ.
-   - Ví dụ: `" fpt "` $\rightarrow$ `"FPT"`, `"vic/vn"` $\rightarrow$ `"VIC"`.
+   - Loại bỏ khoảng trắng đầu/cuối, chuyển thành chữ in hoa toàn bộ, chỉ giữ ký tự chữ và số.
 2. **Chuẩn hóa Khung thời gian (`Timeframe`):**
-   - Giữ nguyên các định danh chuẩn TradingView:
-     - Khung phút: `'1'`, `'5'`, `'15'`, `'30'`, `'60'`, `'120'`, `'240'`.
-     - Khung ngày/tuần/tháng: `'D'`, `'W'`, `'M'`.
-   - Nếu timeframe rỗng hoặc không xác định: mặc định gán `'D'`.
+   - Khung phút: `'1'`, `'5'`, `'15'`, `'30'`, `'60'`, `'120'`, `'240'`.
+   - Khung ngày/tuần/tháng: `'D'`, `'W'`, `'M'`.
 3. **Chuẩn hóa Thời gian (`Timestamp`):**
-   - Tất cả thời gian phải là số nguyên Unix timestamp tính bằng mili-giây (`ms`).
-   - Nếu dữ liệu nguồn trả về giây (`s`), bắt buộc nhân $1000$.
+   - Mọi mốc thời gian lưu trữ nội bộ là số nguyên Unix timestamp tính bằng mili-giây (`ms`).
+   - Khi xuất JSON ra tệp, chuyển đổi sang chuỗi chuẩn ISO 8601 kèm múi giờ (`+07:00`).
 4. **Chuẩn hóa Giá trị Số (`Price` & `Coordinates`):**
    - Loại bỏ `NaN`, `Infinity`.
-   - Làm tròn tối đa 4 chữ số thập phân đối với giá cổ phiếu Việt Nam (bước giá tối thiểu $0.01$ - $0.05$).
-5. **Chuẩn hóa Mã màu (`Colors`):**
-   - Chuẩn hóa về chuỗi HEX (`#RRGGBB` hoặc `#RRGGBBAA`) hoặc `rgba(...)`.
+   - Làm tròn tối đa 4 chữ số thập phân đối với giá chứng khoán Việt Nam.
 
 ---
 
 ## 6. CHIẾN LƯỢC CHUYỂN ĐỔI DỮ LIỆU TỪ MVP 1.0 (MIGRATION STRATEGY)
 
-Để đảm bảo người dùng đang chạy phiên bản cũ nâng cấp lên bản 2.0 mà không bị mất dữ liệu đã trích xuất, `StorageRepository` cung cấp hàm tự động migrate khi khởi động:
+Tự động thực thi bởi `StorageRepository.migrateStorageV1toV2()` khi extension khởi động:
+- Đọc các khóa MVP cũ: `latestSnapshot`, `latestIndicators`, `latestWatchlist`.
+- Tạo `StockRegistryItem` với `sources: ['FIREANT']`.
+- Phân vùng snapshot vào `chartSnapshots:<compositeKey>`.
+- Chuyển `latestWatchlist` sang `globalWatchlist`.
+- Khởi tạo `StockRegistryState` phiên bản 2.0.
 
-```mermaid
-flowchart TD
-    Start["Khởi động Extension"] --> CheckReg{"Kiểm tra khóa 'stockRegistry'"}
-    CheckReg -- "Đã tồn tại (v2.0)" --> NormalFlow["Tiếp tục hoạt động bình thường"]
-    CheckReg -- "Chưa tồn tại" --> CheckLegacy{"Kiểm tra khóa MVP cũ:\n'latestSnapshot' / 'latestWatchlist'"}
-    
-    CheckLegacy -- "Không có dữ liệu cũ" --> InitFresh["Khởi tạo StockRegistryState rỗng v2.0"]
-    CheckLegacy -- "Có dữ liệu cũ" --> ExecuteMigration["Thực thi Migrate V1 -> V2"]
-    
-    ExecuteMigration --> ReadV1["1. Đọc latestSnapshot & latestWatchlist"]
-    ReadV1 --> ParseV1["2. Trích xuất Symbol, Timeframe, Drawings cũ"]
-    ParseV1 --> GenContext["3. Tạo CompositeKey (ví dụ: FPT_VN_D)"]
-    GenContext --> WriteSnapshot["4. Ghi chartSnapshots:FPT_VN_D"]
-    WriteSnapshot --> WriteWatchlist["5. Ghi globalWatchlist độc lập"]
-    WriteWatchlist --> CreateRegistry["6. Tạo StockRegistryState chứa FPT"]
-    CreateRegistry --> CleanupLegacy["7. Đánh dấu migrated: true trên key cũ"]
-    CleanupLegacy --> NormalFlow
-    InitFresh --> NormalFlow
-```
+---
 
-### Thuật toán thực thi di chuyển dữ liệu:
+## 7. MÔ HÌNH DỮ LIỆU XUẤT TOÀN DIỆN (EXPORT ALL JSON ENVELOPE)
+
+Để đáp ứng tính năng **Xuất Toàn bộ Dữ liệu ra một tệp JSON duy nhất**, hệ thống định nghĩa một Envelope JSON độc lập, có phiên bản rõ ràng (`schemaVersion: 1`).
+
+### 7.1. Cấu trúc Phong bì Tệp Xuất (Export JSON Envelope Contract)
+
 ```typescript
-export async function migrateStorageV1toV2(): Promise<void> {
-  const legacyData = await chrome.storage.local.get([
-    'stockRegistry',
-    'latestSnapshot',
-    'latestIndicators',
-    'latestWatchlist',
-  ]);
+export interface ExportMetadata {
+  /** Tên định danh ứng dụng */
+  application: 'Stock Chart Extractor';
 
-  if (legacyData.stockRegistry) {
-    // Đã ở v2.0, không cần migration
-    return;
-  }
+  /** Loại xuất dữ liệu */
+  exportType: 'ALL';
 
-  console.log('[Storage Migration] Detected legacy MVP 1.0 data. Starting migration to Multi-Stock 2.0...');
+  /** Phiên bản schema của tệp xuất (bắt đầu từ 1) */
+  schemaVersion: 1;
 
-  const now = Date.now();
-  const registryItems: Record<string, StockRegistryItem> = {};
-  let activeSymbol: string | null = null;
-  let activeCompositeKey: string | null = null;
+  /** Thời điểm xuất dữ liệu chuẩn ISO 8601 kèm múi giờ */
+  exportedAt: string; // e.g. "2026-11-17T11:30:00.000+07:00"
 
-  // 1. Chuyển đổi Snapshot & Indicators
-  if (legacyData.latestSnapshot) {
-    const rawSnap = legacyData.latestSnapshot;
-    const symbol = (rawSnap.symbol || 'UNKNOWN').trim().toUpperCase();
-    const timeframe = rawSnap.timeframe || 'D';
-    const exchange = rawSnap.exchange || 'VN';
-    const compositeKey = buildChartCompositeKey(symbol, timeframe, exchange);
+  /** Phiên bản extension (ví dụ: "0.1.0") */
+  extensionVersion: string | null;
 
-    const migratedSnapshot: IsolatedChartSnapshot = {
-      version: '2.0',
-      context: {
-        symbol,
-        exchange,
-        timeframe,
-        chartId: 'chart-main-0',
-        compositeKey,
-      },
-      compositeKey,
-      generationId: 1,
-      drawings: rawSnap.drawings || [],
-      indicators: legacyData.latestIndicators?.items || [],
-      drawingsCount: rawSnap.drawings?.length || 0,
-      indicatorsCount: legacyData.latestIndicators?.items?.length || 0,
-      extractedAt: rawSnap.extractedAt || now,
-    };
-
-    // Ghi snapshot mới theo composite key
-    await chrome.storage.local.set({
-      [`chartSnapshots:${compositeKey}`]: migratedSnapshot,
-    });
-
-    registryItems[symbol] = {
-      symbol,
-      exchange,
-      sources: ['FIREANT'],
-      isOpened: true,
-      isActive: true,
-      chartContexts: [{
-        chartId: 'chart-main-0',
-        timeframe,
-        compositeKey,
-        lastSyncAt: migratedSnapshot.extractedAt,
-        drawingsCount: migratedSnapshot.drawingsCount,
-        indicatorsCount: migratedSnapshot.indicatorsCount,
-      }],
-      lastDetectedAt: now,
-      createdAt: now,
-    };
-
-    activeSymbol = symbol;
-    activeCompositeKey = compositeKey;
-  }
-
-  // 2. Chuyển đổi Watchlist sang khóa toàn cục độc lập
-  if (legacyData.latestWatchlist) {
-    const rawWatchlist = legacyData.latestWatchlist;
-    const globalWatchlist: GlobalWatchlistSnapshot = {
-      version: '2.0',
-      activeCategoryId: rawWatchlist.activeCategoryId || null,
-      categories: rawWatchlist.categories || [],
-      stocks: rawWatchlist.stocks || {},
-      totalStocksCount: rawWatchlist.activeItems?.length || 0,
-      lastSyncedAt: rawWatchlist.extractedAt || now,
-    };
-
-    await chrome.storage.local.set({ globalWatchlist });
-  }
-
-  // 3. Ghi khởi tạo StockRegistryState
-  const initialRegistry: StockRegistryState = {
-    version: '2.0',
-    activeSymbol,
-    activeCompositeKey,
-    items: registryItems,
-    updatedAt: now,
+  /** Thông tin môi trường thực thi */
+  environment: {
+    platform: 'FireAnt';
+    manifestVersion: 3;
+    exportSource: 'StorageRepository';
   };
 
-  await chrome.storage.local.set({ stockRegistry: initialRegistry });
-  console.log('[Storage Migration] Migration to Multi-Stock 2.0 completed successfully.');
+  /** Thống kê số lượng tổng hợp */
+  summary: {
+    totalStocks: number;
+    totalSnapshots: number;
+    totalDrawings: number;
+    totalIndicators: number;
+    totalWatchlistItems: number;
+  };
 }
+
+export interface ExportedStockItem {
+  symbol: string;
+  exchange: string | null;
+  sources: ('FIREANT' | 'EXTENSION')[];
+  isOpened: boolean;
+  isActive: boolean;
+  chartContexts: string[]; // Danh sách các chartId hoặc compositeKey tương ứng
+  lastDetectedAt: string | null; // ISO 8601
+  createdAt: string; // ISO 8601
+}
+
+export type ExtractionDataStatus = 'SUCCESS' | 'EMPTY' | 'FAILED' | 'NOT_INVESTIGATED' | 'NOT_ACCESSIBLE';
+
+export interface ExportedChartSnapshot {
+  chartId: string;
+  symbol: string;
+  exchange: string | null;
+  timeframe: string;
+  compositeKey: string;
+  status: ExtractionDataStatus;
+  statusReason?: string;
+  drawingsCount: number;
+  indicatorsCount: number;
+  drawings: DrawingItem[];
+  indicators: IndicatorItem[];
+  capturedAt: string | null; // ISO 8601
+}
+
+export interface ExportedWatchlistGroup {
+  id: string;
+  name: string;
+  isDefault: boolean;
+  displayIndex: number;
+  totalSymbols: number;
+  items: WatchlistItem[];
+}
+
+export interface ExportedWatchlist {
+  status: ExtractionDataStatus;
+  statusReason?: string;
+  activeWatchlistId: string | null;
+  totalWatchlists: number;
+  watchlists: ExportedWatchlistGroup[];
+  activeItems: WatchlistItem[];
+  lastSyncedAt: string | null; // ISO 8601
+}
+
+export interface ExportAllDataEnvelope {
+  metadata: ExportMetadata;
+  stockRegistry: ExportedStockItem[];
+  chartSnapshots: ExportedChartSnapshot[];
+  watchlist: ExportedWatchlist;
+}
+```
+
+### 7.2. Tính Độc lập của Schema Xuất (Schema Independence)
+- **Lý do tách biệt:** Schema của tệp xuất đại diện cho giao ước dữ liệu công khai (Public Data Contract), dành cho người dùng và các hệ thống phân tích bên ngoài.
+- `schemaVersion: 1` là một số nguyên độc lập. Khi cấu trúc lưu trữ nội bộ của Chrome Extension thay đổi (ví dụ nâng cấp từ `chrome.storage.local` partition sang IndexedDB), `Export Serializer` chỉ cần ánh xạ lại vào cấu trúc Envelope v1 mà **không làm hỏng tệp đã lưu của người dùng**.
+
+### 7.3. Quan hệ Thực thể và Tính Toàn vẹn Tham chiếu (Referential Consistency)
+1. **Quan hệ 1-Nhiều (Stock $\rightarrow$ Chart Snapshots):**
+   - Mỗi mã trong `stockRegistry` chứa danh sách tham chiếu `chartContexts: ["FPT_HOSE_15", "FPT_HOSE_D"]`.
+   - Mỗi snapshot trong `chartSnapshots` mang trường `compositeKey` hoặc `chartId` tương ứng.
+2. **Quy tắc kiểm tra toàn vẹn (Integrity Rule):**
+   - Mọi mã cổ phiếu xuất hiện trong `chartSnapshots` đều phải tồn tại bản ghi trong `stockRegistry`.
+   - Không được phép có bản ghi mồ côi (Orphan Snapshots).
+
+### 7.4. Phân định Trạng thái Dữ liệu (Data Completeness vs Failure)
+Hệ thống **tuyệt đối không âm thầm chuyển lỗi trích xuất thành mảng rỗng** (`[]`):
+
+| Trạng thái | Ý nghĩa kỹ thuật | Điều kiện kích hoạt |
+|---|---|---|
+| `SUCCESS` | Trích xuất thành công, có dữ liệu | Mảng `drawings` hoặc `indicators` có phần tử ($> 0$). |
+| `EMPTY` | Trích xuất thành công, người dùng chưa vẽ | Biểu đồ kết nối tốt nhưng mảng rỗng ($= 0$). |
+| `FAILED` | Trích xuất thất bại / Lỗi hệ thống | Bị chặn, crash model, hoặc lỗi serialize. Kèm `statusReason`. |
+| `NOT_ACCESSIBLE` | Nguồn dữ liệu không thể truy cập | Tab bị đóng, cookie hết hạn hoặc phiên làm việc mất. |
+| `NOT_INVESTIGATED` | Mã thủ công chưa từng được mở biểu đồ | Mã do người dùng nhập nhưng chưa mở trên FireAnt. |
+
+### 7.5. Cơ chế Khử trùng An toàn & Danh sách Cho phép (Security Allowlist Sanitization)
+Để đảm bảo an toàn tuyệt đối cho người dùng, `Export Serializer` bắt buộc thi hành bộ lọc Allowlist trước khi xuất tệp:
+
+```typescript
+// Danh sách trường cho phép (Allowlist)
+const ALLOWED_WATCHLIST_ITEM_FIELDS = [
+  'id', 'symbol', 'name', 'exchange', 'price', 
+  'referencePrice', 'change', 'changePercent', 'volume', 'position', 'metadata'
+];
+
+// Danh sách trường cấm tuyệt đối (Blacklist Sanitize)
+const FORBIDDEN_FIELDS = [
+  'token', 'jwt', 'accessToken', 'refreshToken', 'cookie', 
+  'password', 'sessionId', 'authorization', 'secret', 'email', 'phone'
+];
+```
+
+Mọi thuộc tính thừa từ `localStorage.persist:watchlists` hoặc TradingView model không nằm trong allowlist hoặc chứa từ khóa nhạy cảm đều bị loại bỏ hoàn toàn.
+
+### 7.6. Lược đồ Kiểm thực Zod cho Tệp Xuất (Export Zod Schema)
+
+```typescript
+export const ExportMetadataSchema = z.object({
+  application: z.literal('Stock Chart Extractor'),
+  exportType: z.literal('ALL'),
+  schemaVersion: z.literal(1),
+  exportedAt: z.string().datetime({ offset: true }),
+  extensionVersion: z.string().nullable(),
+  environment: z.object({
+    platform: z.literal('FireAnt'),
+    manifestVersion: z.literal(3),
+    exportSource: z.literal('StorageRepository'),
+  }),
+  summary: z.object({
+    totalStocks: z.number().int().nonnegative(),
+    totalSnapshots: z.number().int().nonnegative(),
+    totalDrawings: z.number().int().nonnegative(),
+    totalIndicators: z.number().int().nonnegative(),
+    totalWatchlistItems: z.number().int().nonnegative(),
+  }),
+});
+
+export const ExportedStockItemSchema = z.object({
+  symbol: z.string().min(1),
+  exchange: z.string().nullable(),
+  sources: z.array(z.enum(['FIREANT', 'EXTENSION'])),
+  isOpened: z.boolean(),
+  isActive: z.boolean(),
+  chartContexts: z.array(z.string()),
+  lastDetectedAt: z.string().nullable(),
+  createdAt: z.string(),
+});
+
+export const ExportedChartSnapshotSchema = z.object({
+  chartId: z.string(),
+  symbol: z.string().min(1),
+  exchange: z.string().nullable(),
+  timeframe: z.string(),
+  compositeKey: z.string(),
+  status: z.enum(['SUCCESS', 'EMPTY', 'FAILED', 'NOT_INVESTIGATED', 'NOT_ACCESSIBLE']),
+  statusReason: z.string().optional(),
+  drawingsCount: z.number().int().nonnegative(),
+  indicatorsCount: z.number().int().nonnegative(),
+  drawings: z.array(DrawingObjectSchema),
+  indicators: z.array(IndicatorItemSchema),
+  capturedAt: z.string().nullable(),
+});
+
+export const ExportedWatchlistSchema = z.object({
+  status: z.enum(['SUCCESS', 'EMPTY', 'NOT_ACCESSIBLE']),
+  statusReason: z.string().optional(),
+  activeWatchlistId: z.string().nullable(),
+  totalWatchlists: z.number().int().nonnegative(),
+  watchlists: z.array(WatchlistGroupSchema),
+  activeItems: z.array(WatchlistItemSchema),
+  lastSyncedAt: z.string().nullable(),
+});
+
+export const ExportAllDataEnvelopeSchema = z.object({
+  metadata: ExportMetadataSchema,
+  stockRegistry: z.array(ExportedStockItemSchema),
+  chartSnapshots: z.array(ExportedChartSnapshotSchema),
+  watchlist: ExportedWatchlistSchema,
+});
 ```

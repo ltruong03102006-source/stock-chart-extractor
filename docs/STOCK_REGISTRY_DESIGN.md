@@ -185,3 +185,39 @@ chrome.storage.local.get('stockRegistry', ...)
 
 - Khi có bất kỳ thay đổi nào (thêm mã thủ công, phát hiện biểu đồ mới từ FireAnt), Registry cập nhật ngay vào `chrome.storage.local`.
 - Side Panel lắng nghe `chrome.storage.onChanged` trên khóa `stockRegistry` để tái hiển thị danh sách trong khu vực **Stock Manager** theo thời gian thực mà không cần reload.
+
+---
+
+## 7. ÁNH XẠ DỮ LIỆU SANG ĐỊNH DẠNG EXPORT ALL JSON (EXPORT ALL MAPPING)
+
+Tính năng **Export All JSON** trích xuất toàn bộ dữ liệu hệ thống thành một file JSON duy nhất. Dưới đây là quy chuẩn chuyển đổi và ánh xạ các thực thể của Stock Registry:
+
+### 7.1. Cấu trúc ánh xạ (Schema Mapping)
+
+Mỗi thực thể `StockRegistryItem` trong bộ nhớ/storage sẽ được chuyển đổi sang định dạng `ExportedStockItem` chuẩn hóa:
+
+```typescript
+export interface ExportedStockItem {
+  symbol: string;                       // Chuẩn hóa in hoa
+  exchange: string | null;              // Sàn giao dịch hoặc null
+  sources: StockSource[];               // ['FIREANT'], ['EXTENSION'], hoặc cả hai
+  isOpened: boolean;                    // Đang mở trên FireAnt tại thời điểm snapshot
+  isActive: boolean;                    // Biểu đồ đang được chọn
+  lastDetectedAt: string;               // ISO 8601 UTC string (ví dụ: '2026-11-17T04:30:00.000Z')
+  chartContexts: Array<{
+    chartId: string;
+    timeframe: string;
+    compositeKey: string;               // symbol_exchange_timeframe
+    lastSyncAt: string;                 // ISO 8601 UTC string
+    drawingsCount: number;
+    indicatorsCount: number;
+  }>;
+}
+```
+
+### 7.2. Quy tắc toàn vẹn dữ liệu khi Xuất (Integrity Rules for Export)
+1. **Bảo toàn nguồn sở hữu (Preserve Source Ownership):** Mảng `sources` giữ nguyên danh sách nguồn quản trị thực tế (`FIREANT`, `EXTENSION` hoặc cả hai), không hợp nhất hay làm mất dấu vết nguồn gốc.
+2. **Không trùng lặp mã (Unique Symbols):** Mảng `stockRegistry` trong file xuất là tập hợp các mã duy nhất. Mỗi mã chỉ xuất hiện đúng một lần.
+3. **Liên kết toàn vẹn tham chiếu (Referential Integrity):** Mỗi mục trong `chartContexts` của một mã cổ phiếu phải tương ứng chính xác với một khóa định danh trong từ điển `chartSnapshots` cấp cao (thông qua `compositeKey`), đảm bảo không có liên kết mồ côi (orphaned reference).
+4. **Chuẩn hóa thời gian (Timestamp Normalization):** Toàn bộ các mốc thời gian Unix millisecond (`lastDetectedAt`, `lastSyncAt`) được định dạng lại thành chuỗi ISO 8601 chuẩn quốc tế có timezone offset (`YYYY-MM-DDTHH:mm:ss.sssZ`).
+
