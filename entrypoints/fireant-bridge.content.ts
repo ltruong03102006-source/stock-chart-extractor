@@ -6,8 +6,8 @@ import { extractWatchlists } from '@/src/extractors/watchlist/watchlist.extracto
 
 export default defineContentScript({
   matches: [
-    'https://fireant.vn/*',
-    'https://*.fireant.vn/*',
+    '*://fireant.vn/*',
+    '*://*.fireant.vn/*',
   ],
   world: 'MAIN',
   allFrames: true,

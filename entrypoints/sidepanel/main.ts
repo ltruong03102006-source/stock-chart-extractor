@@ -217,7 +217,7 @@ async function sendSyncRequest(button?: HTMLElement) {
 
   // 2. Query ALL tabs matching FireAnt and send direct sync request
   try {
-    const tabs = await browser.tabs.query({ url: ['https://fireant.vn/*', 'https://*.fireant.vn/*'] });
+    const tabs = await browser.tabs.query({ url: ['*://fireant.vn/*', '*://*.fireant.vn/*'] });
     if (tabs && tabs.length > 0) {
       for (const tab of tabs) {
         if (tab.id) {
@@ -358,3 +358,30 @@ browser.runtime.onMessage.addListener((message: unknown) => {
     renderWatchlist(parsed.data.payload as WatchlistSnapshot);
   }
 });
+
+// ----------------------------------------------------
+// DIAGNOSTIC EXPOSURE IN SIDE PANEL WINDOW
+// ----------------------------------------------------
+(window as any).__STOCK_CHART_EXTRACTOR__ = {
+  version: '1.0.0 (SidePanel)',
+  getDrawings: () => currentDrawingsSnapshot,
+  getIndicators: () => currentIndicatorsSnapshot,
+  getWatchlist: () => currentWatchlistSnapshot,
+  sync: () => sendSyncRequest(),
+  status: () => {
+    const badgeText = document.getElementById('sync-badge')?.textContent || 'INITIALIZING';
+    return {
+      context: 'SidePanel',
+      badge: badgeText,
+      drawingsCount: currentDrawingsSnapshot?.drawings?.length ?? 0,
+      indicatorsCount: currentIndicatorsSnapshot?.items?.length ?? 0,
+      watchlistCount: currentWatchlistSnapshot?.activeItems?.length ?? 0,
+      cachedSnapshots: {
+        drawings: Boolean(currentDrawingsSnapshot),
+        indicators: Boolean(currentIndicatorsSnapshot),
+        watchlist: Boolean(currentWatchlistSnapshot),
+      },
+      hint: 'If running from FireAnt web tab, ensure DevTools dropdown is set to top and page is refreshed.',
+    };
+  },
+};

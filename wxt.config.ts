@@ -10,10 +10,11 @@ export default defineConfig({
       'activeTab',
       'sidePanel',
       'tabs',
+      'scripting',
     ],
     host_permissions: [
-      'https://fireant.vn/*',
-      'https://*.fireant.vn/*',
+      '*://fireant.vn/*',
+      '*://*.fireant.vn/*',
     ],
   },
 });
