@@ -3,46 +3,6 @@ import { ExtensionMessageSchema } from '@/src/messaging/message.schemas';
 export default defineBackground(() => {
   console.log('[Stock Chart Extractor] Background service worker initialized.');
 
-  // Helper to dynamically inject scripts into already-open FireAnt tabs if detached
-  async function ensureInjected(tabId: number): Promise<boolean> {
-    try {
-      await browser.tabs.sendMessage(tabId, {
-        source: 'STOCK_CHART_EXTRACTOR',
-        type: 'PING',
-        timestamp: Date.now(),
-      });
-      return true;
-    } catch {
-      const chromeObj = (globalThis as any).chrome;
-      if (chromeObj?.scripting?.executeScript) {
-        try {
-          // Target main frame only to avoid cross-origin third-party iframe errors
-          await chromeObj.scripting.executeScript({
-            target: { tabId },
-            files: ['content-scripts/fireant-bridge.js'],
-            world: 'MAIN',
-          });
-          await chromeObj.scripting.executeScript({
-            target: { tabId },
-            files: ['content-scripts/fireant.js'],
-          });
-          console.log(`[Stock Chart Extractor] Dynamically injected scripts into tab ${tabId}`);
-          return true;
-        } catch (err) {
-          console.warn(`[Stock Chart Extractor] Failed to inject scripts into tab ${tabId}:`, err);
-        }
-      }
-      return false;
-    }
-  }
-
-  // Scan and auto-inject into existing FireAnt tabs on background startup
-  browser.tabs.query({}).then((tabs) => {
-    tabs.filter((t) => t.url && t.url.includes('fireant')).forEach((tab) => {
-      if (tab.id) ensureInjected(tab.id);
-    });
-  }).catch(() => {});
-
   // Configure side panel to open on action click if supported by Chrome MV3
   const chromeObj = (globalThis as any).chrome;
   if (chromeObj?.sidePanel?.setPanelBehavior) {
@@ -84,15 +44,11 @@ export default defineBackground(() => {
         const fireantTabs = tabs.filter((t) => t.url && t.url.includes('fireant'));
         fireantTabs.forEach((tab) => {
           if (tab.id) {
-            ensureInjected(tab.id).then(() => {
-              setTimeout(() => {
-                browser.tabs.sendMessage(tab.id!, {
-                  source: 'STOCK_CHART_EXTRACTOR',
-                  type: 'REQUEST_SYNC',
-                  timestamp: Date.now(),
-                }).catch(() => {});
-              }, 100);
-            });
+            browser.tabs.sendMessage(tab.id, {
+              source: 'STOCK_CHART_EXTRACTOR',
+              type: 'REQUEST_SYNC',
+              timestamp: Date.now(),
+            }).catch(() => {});
           }
         });
       });

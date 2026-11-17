@@ -3,8 +3,8 @@ import { ExtensionMessageSchema } from '@/src/messaging/message.schemas';
 
 export default defineContentScript({
   matches: [
-    '*://fireant.vn/*',
-    '*://*.fireant.vn/*',
+    'https://fireant.vn/*',
+    'https://*.fireant.vn/*',
   ],
   allFrames: true,
   matchAboutBlank: true,
