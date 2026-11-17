@@ -3,10 +3,13 @@ import {
   type ChartSnapshot,
   type IndicatorsSnapshot,
   type WatchlistSnapshot,
+  type StockRegistryState,
 } from '@/src/messaging/message.types';
 import { ExtensionMessageSchema } from '@/src/messaging/message.schemas';
+import { getAllStocks, normalizeSymbol } from '@/src/registry/stock-registry';
 
-// Cache state
+// Global cache state for Side Panel
+let currentRegistryState: StockRegistryState | null = null;
 let currentDrawingsSnapshot: ChartSnapshot | null = null;
 let currentIndicatorsSnapshot: IndicatorsSnapshot | null = null;
 let currentWatchlistSnapshot: WatchlistSnapshot | null = null;
@@ -18,6 +21,120 @@ function updateBadge() {
   if (badgeEl) {
     badgeEl.textContent = `Synced (#${updateCounter})`;
     badgeEl.className = 'badge badge-synced';
+  }
+}
+
+// ----------------------------------------------------
+// AREA A: STOCK MANAGER RENDERER
+// ----------------------------------------------------
+function renderStockManager(registry: StockRegistryState) {
+  if (!registry) return;
+  currentRegistryState = registry;
+  updateBadge();
+
+  const countEl = document.getElementById('stock-manager-count');
+  const listEl = document.getElementById('stock-manager-list');
+  const selectedStockTitleEl = document.getElementById('selected-stock-title');
+  const selectedStockBadgesEl = document.getElementById('selected-stock-badges');
+
+  const stocks = getAllStocks(registry);
+  if (countEl) countEl.textContent = `${stocks.length} mã`;
+
+  const activeItem = registry.activeSymbol ? registry.items[registry.activeSymbol] : null;
+  if (selectedStockTitleEl) {
+    if (activeItem) {
+      const activeCtx = activeItem.chartContexts[0];
+      const tfText = activeCtx ? ` • Khung: ${activeCtx.timeframe}` : '';
+      const exText = activeItem.exchange ? ` • ${activeItem.exchange}` : '';
+      selectedStockTitleEl.textContent = `${activeItem.symbol}${exText}${tfText}`;
+    } else {
+      selectedStockTitleEl.textContent = '---';
+    }
+  }
+
+  if (selectedStockBadgesEl && activeItem) {
+    selectedStockBadgesEl.innerHTML = `
+      <span class="badge ${activeItem.isActive ? 'badge-synced' : 'badge-pane-main'}">
+        ${activeItem.isActive ? '● Active' : '○ Opened'}
+      </span>
+    `;
+  }
+
+  if (listEl) {
+    if (stocks.length === 0) {
+      listEl.innerHTML = `
+        <div style="color: var(--text-secondary); text-align: center; padding: 12px; font-size: 11px;">
+          Chưa có mã nào trong danh sách quản lý...
+        </div>
+      `;
+      return;
+    }
+
+    listEl.innerHTML = stocks
+      .map((item) => {
+        const isCurrent = item.symbol === registry.activeSymbol;
+        const activeCtx = item.chartContexts[0];
+        const drawingsCount = activeCtx ? activeCtx.drawingsCount : 0;
+        const indicatorsCount = activeCtx ? activeCtx.indicatorsCount : 0;
+
+        let statusBadge = '';
+        if (item.isActive) {
+          statusBadge = '<span class="badge badge-synced" style="font-size: 10px;">● Active Chart</span>';
+        } else if (item.isOpened) {
+          statusBadge = '<span class="badge badge-pane-main" style="font-size: 10px;">○ FireAnt</span>';
+        } else {
+          statusBadge = '<span class="badge" style="background:#334155;color:#94a3b8;font-size:10px;">○ Manual</span>';
+        }
+
+        const borderStyle = isCurrent ? 'border-left: 3px solid #38bdf8; background: #1e293b;' : '';
+
+        return `
+          <div class="list-item stock-row" data-symbol="${item.symbol}" style="cursor: pointer; ${borderStyle}">
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <span class="tag-symbol">${item.symbol}</span>
+              ${statusBadge}
+              <span style="color: var(--text-secondary); font-size: 10px;">
+                ${drawingsCount > 0 ? `${drawingsCount}d` : ''} ${indicatorsCount > 0 ? `${indicatorsCount}i` : ''}
+              </span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <button class="btn-delete-stock" data-symbol="${item.symbol}" title="Xóa mã khỏi danh sách quản lý" style="background: transparent; border: none; color: #ef4444; font-size: 14px; cursor: pointer; padding: 2px 6px; border-radius: 4px;">&times;</button>
+            </div>
+          </div>
+        `;
+      })
+      .join('');
+
+    // Attach row click to select active stock
+    listEl.querySelectorAll('.stock-row').forEach((row) => {
+      row.addEventListener('click', (e) => {
+        const target = e.target as HTMLElement;
+        if (target.classList.contains('btn-delete-stock')) return;
+        const symbol = row.getAttribute('data-symbol');
+        if (symbol) {
+          browser.runtime.sendMessage({
+            source: EXTENSION_SOURCE,
+            type: 'SET_ACTIVE_STOCK',
+            payload: { symbol },
+          }).catch(() => {});
+        }
+      });
+    });
+
+    // Attach delete button click
+    listEl.querySelectorAll('.btn-delete-stock').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const symbol = btn.getAttribute('data-symbol');
+        if (symbol) {
+          browser.runtime.sendMessage({
+            source: EXTENSION_SOURCE,
+            type: 'REMOVE_MANUAL_STOCK',
+            payload: { symbol },
+          }).catch(() => {});
+        }
+      });
+    });
   }
 }
 
@@ -44,7 +161,7 @@ function renderDrawings(snapshot: ChartSnapshot) {
     if (!snapshot.drawings || snapshot.drawings.length === 0) {
       drawingListEl.innerHTML = `
         <div style="color: var(--text-secondary); text-align: center; padding: 12px;">
-          No drawing objects on chart. Draw on FireAnt to test!
+          Chưa có hình vẽ nào trên biểu đồ. Hãy thử vẽ trên FireAnt!
         </div>
       `;
     } else {
@@ -98,36 +215,26 @@ function renderIndicators(snapshot: IndicatorsSnapshot) {
     if (items.length === 0) {
       indicatorsListEl.innerHTML = `
         <div style="color: var(--text-secondary); text-align: center; padding: 12px;">
-          No technical indicators found on chart.
+          Chưa có chỉ báo nào trên biểu đồ.
         </div>
       `;
     } else {
       indicatorsListEl.innerHTML = items
-        .map((item) => {
-          const paneType = item.pane?.type || 'main';
-          const paneBadgeClass = paneType === 'main' ? 'badge-pane-main' : 'badge-pane-sep';
-          const inputsBrief = Object.entries(item.inputs || {})
-            .map(([k, v]) => `${k}:${v}`)
-            .slice(0, 3)
-            .join(', ');
-
-          return `
+        .map(
+          (ind) => `
           <div class="list-item">
             <div>
-              <div>
-                <strong style="color: var(--text-primary); font-size: 12px;">${item.name}</strong>
-                <span class="badge ${paneBadgeClass}" style="font-size: 9px; margin-left: 4px;">${paneType.toUpperCase()}</span>
-              </div>
-              <div style="color: var(--text-secondary); font-size: 10px; margin-top: 2px;">
-                ${inputsBrief ? `[${inputsBrief}]` : 'Default parameters'}
-              </div>
+              <strong style="color: var(--accent-blue);">${ind.name}</strong>
+              <span style="color: var(--text-secondary); font-size: 11px;">(${ind.shortName || ind.type})</span>
             </div>
-            <div style="text-align: right; font-size: 11px; color: var(--text-secondary);">
-              ID: <code style="color: var(--accent-blue);">${item.id}</code>
+            <div>
+              <span class="badge ${ind.pane?.type === 'main' ? 'badge-pane-main' : 'badge-pane-sep'}">
+                ${ind.pane?.type === 'main' ? 'Main' : 'Pane'}
+              </span>
             </div>
           </div>
-        `;
-        })
+        `
+        )
         .join('');
     }
   }
@@ -138,7 +245,7 @@ function renderIndicators(snapshot: IndicatorsSnapshot) {
 }
 
 // ----------------------------------------------------
-// TAB 3: WATCHLIST RENDERER
+// TAB 3: WATCHLIST RENDERER (DECOUPLED GLOBAL DATA)
 // ----------------------------------------------------
 function renderWatchlist(snapshot: WatchlistSnapshot) {
   if (!snapshot) return;
@@ -151,20 +258,19 @@ function renderWatchlist(snapshot: WatchlistSnapshot) {
   const watchlistItemsListEl = document.getElementById('watchlist-items-list');
   const jsonViewerWatchlistEl = document.getElementById('json-viewer-watchlist');
 
-  const watchlists = Array.isArray(snapshot.watchlists) ? snapshot.watchlists : [];
-  const activeGroup = watchlists.find((w) => w.id === snapshot.activeWatchlistId) || watchlists[0];
-  const groupName = activeGroup ? activeGroup.name : 'Default';
-  if (statWatchlistNameEl) statWatchlistNameEl.textContent = groupName;
-
+  const activeGroup = (snapshot.watchlists || []).find((g) => g.id === snapshot.activeWatchlistId) || snapshot.watchlists?.[0];
   const items = snapshot.activeItems || activeGroup?.items || [];
-  if (statWatchlistCountEl) statWatchlistCountEl.textContent = String(items.length);
-  if (tabCountWatchlistEl) tabCountWatchlistEl.textContent = String(items.length);
+  const total = items.length;
+
+  if (statWatchlistNameEl) statWatchlistNameEl.textContent = activeGroup?.name || 'Mặc định';
+  if (statWatchlistCountEl) statWatchlistCountEl.textContent = String(total);
+  if (tabCountWatchlistEl) tabCountWatchlistEl.textContent = String(total);
 
   if (watchlistItemsListEl) {
     if (items.length === 0) {
       watchlistItemsListEl.innerHTML = `
         <div style="color: var(--text-secondary); text-align: center; padding: 12px;">
-          No stocks in current watchlist.
+          Chưa có danh mục theo dõi nào được tải.
         </div>
       `;
     } else {
@@ -173,11 +279,11 @@ function renderWatchlist(snapshot: WatchlistSnapshot) {
           (item) => `
           <div class="list-item">
             <div style="display: flex; align-items: center; gap: 8px;">
-              <span style="color: var(--text-secondary); font-size: 11px; width: 20px;">#${item.position + 1}</span>
               <span class="tag-symbol">${item.symbol}</span>
+              <span style="color: var(--text-secondary); font-size: 11px;">${item.exchange || 'VN'}</span>
             </div>
-            <div style="font-size: 11px; color: var(--accent-green);">
-              VERIFIED
+            <div style="font-weight: 600; font-family: monospace;">
+              ${item.price !== null && item.price !== undefined ? item.price.toFixed(2) : '---'}
             </div>
           </div>
         `
@@ -192,21 +298,17 @@ function renderWatchlist(snapshot: WatchlistSnapshot) {
 }
 
 // ----------------------------------------------------
-// ----------------------------------------------------
-// SYNC REQUEST TRIGGER
+// SYNC DISPATCHER FUNCTION
 // ----------------------------------------------------
 async function sendSyncRequest(button?: HTMLElement) {
   if (button) {
-    const origText = button.textContent;
     button.textContent = 'Syncing...';
-    button.setAttribute('disabled', 'true');
     setTimeout(() => {
-      button.textContent = origText;
-      button.removeAttribute('disabled');
-    }, 1000);
+      button.textContent = 'Request Sync';
+    }, 1500);
   }
 
-  // 1. Tell background service worker to reply with cache and forward to tabs
+  // 1. Broadcast to extension background
   try {
     browser.runtime.sendMessage({
       source: EXTENSION_SOURCE,
@@ -215,48 +317,22 @@ async function sendSyncRequest(button?: HTMLElement) {
     }).catch(() => {});
   } catch {}
 
-  // 2. Read storage cache immediately in case background already updated it
+  // 2. Query FireAnt tabs directly and send sync request
   try {
-    const res = await browser.storage.local.get(['latestSnapshot', 'latestIndicators', 'latestWatchlist']);
-    if (res.latestSnapshot) renderDrawings(res.latestSnapshot as ChartSnapshot);
-    if (res.latestIndicators) renderIndicators(res.latestIndicators as IndicatorsSnapshot);
-    if (res.latestWatchlist) renderWatchlist(res.latestWatchlist as WatchlistSnapshot);
-  } catch {}
-
-  // 3. Query ALL tabs and filter for FireAnt tabs (bulletproof against query match pattern quirks)
-  try {
-    const allTabs = await browser.tabs.query({});
-    const fireantTabs = allTabs.filter((t) => t.url && t.url.includes('fireant'));
-    if (fireantTabs.length > 0) {
-      if (button) button.textContent = `Syncing (${fireantTabs.length} tab)...`;
-      for (const tab of fireantTabs) {
-        if (tab.id) {
-          browser.tabs.sendMessage(tab.id, {
-            source: EXTENSION_SOURCE,
-            type: 'REQUEST_SYNC',
-            timestamp: Date.now(),
-          }).catch(() => {});
-        }
+    const tabs = await browser.tabs.query({});
+    const fireantTabs = tabs.filter((t) => t.url && t.url.includes('fireant'));
+    for (const tab of fireantTabs) {
+      if (tab.id) {
+        browser.tabs.sendMessage(tab.id, {
+          source: EXTENSION_SOURCE,
+          type: 'REQUEST_SYNC',
+          timestamp: Date.now(),
+        }).catch(() => {});
       }
-    } else {
-      if (button) button.textContent = 'No FireAnt Tab!';
-      console.warn('[Stock Chart Extractor] No FireAnt tabs found among open tabs.');
     }
   } catch (err) {
     console.warn('[Stock Chart Extractor] Failed to query tabs for sync:', err);
   }
-
-  // 4. Fallback: Also try active tab in current window
-  try {
-    const activeTabs = await browser.tabs.query({ active: true, currentWindow: true });
-    if (activeTabs[0]?.id) {
-      browser.tabs.sendMessage(activeTabs[0].id, {
-        source: EXTENSION_SOURCE,
-        type: 'REQUEST_SYNC',
-        timestamp: Date.now(),
-      }).catch(() => {});
-    }
-  } catch {}
 }
 
 // ----------------------------------------------------
@@ -287,13 +363,12 @@ function copyToClipboard(button: HTMLElement, getData: () => unknown) {
 function initSidePanel() {
   console.log('[Stock Chart Extractor][SidePanel] Initializing Side Panel UI...');
 
-  // 1. Direct Click Handlers for Tabs (Guaranteed to work)
+  // 1. Direct Click Handlers for Tabs
   const tabBtns = document.querySelectorAll<HTMLButtonElement>('.tab-btn');
   tabBtns.forEach((btn) => {
     btn.onclick = (e) => {
       e.preventDefault();
       const targetTabId = btn.getAttribute('data-tab');
-      console.log(`[Stock Chart Extractor][SidePanel] Tab clicked: ${targetTabId}`);
       if (!targetTabId) return;
 
       document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
@@ -305,12 +380,11 @@ function initSidePanel() {
     };
   });
 
-  // 2. Direct Click Handlers for Action Buttons
+  // 2. Action Buttons Click Handlers
   const btnSync = document.getElementById('btn-sync') as HTMLElement | null;
   if (btnSync) {
     btnSync.onclick = (e) => {
       e.preventDefault();
-      console.log('[Stock Chart Extractor][SidePanel] Request Sync clicked!');
       sendSyncRequest(btnSync);
     };
   }
@@ -339,28 +413,75 @@ function initSidePanel() {
     };
   }
 
-  // 3. Fallback: Event Delegation on Document
-  document.addEventListener('click', (event) => {
-    const target = (event.target as HTMLElement).closest('.tab-btn') as HTMLElement;
-    if (target) {
-      const targetTabId = target.getAttribute('data-tab');
-      if (targetTabId) {
-        document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
-        document.querySelectorAll('.tab-content').forEach((c) => c.classList.remove('active'));
-        target.classList.add('active');
-        document.getElementById(targetTabId)?.classList.add('active');
+  const btnExportAll = document.getElementById('btn-export-all') as HTMLElement | null;
+  if (btnExportAll) {
+    btnExportAll.onclick = async (e) => {
+      e.preventDefault();
+      const allData = {
+        exportedAt: new Date().toISOString(),
+        stockRegistry: currentRegistryState,
+        latestDrawings: currentDrawingsSnapshot,
+        latestIndicators: currentIndicatorsSnapshot,
+        globalWatchlist: currentWatchlistSnapshot,
+      };
+      await navigator.clipboard.writeText(JSON.stringify(allData, null, 2));
+      const oldText = btnExportAll.textContent;
+      btnExportAll.textContent = '✓ Copied All!';
+      setTimeout(() => {
+        btnExportAll.textContent = oldText;
+      }, 1500);
+    };
+  }
+
+  // 3. Stock Manager Add Stock Handler
+  const inputManual = document.getElementById('input-manual-symbol') as HTMLInputElement | null;
+  const btnAddStock = document.getElementById('btn-add-stock') as HTMLButtonElement | null;
+
+  function handleAddStock() {
+    if (!inputManual) return;
+    const raw = inputManual.value.trim();
+    if (!raw) return;
+    const symbol = normalizeSymbol(raw);
+    if (!symbol) return;
+
+    browser.runtime.sendMessage({
+      source: EXTENSION_SOURCE,
+      type: 'ADD_MANUAL_STOCK',
+      payload: { symbol },
+    }).catch(() => {});
+
+    inputManual.value = '';
+  }
+
+  if (btnAddStock) {
+    btnAddStock.onclick = (e) => {
+      e.preventDefault();
+      handleAddStock();
+    };
+  }
+
+  if (inputManual) {
+    inputManual.onkeydown = (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        handleAddStock();
       }
-    }
-  });
+    };
+  }
 
   // 4. Initial load from local storage cache
   try {
     browser.storage.local
-      .get(['latestSnapshot', 'latestIndicators', 'latestWatchlist'])
+      .get(['stockRegistry', 'latestSnapshot', 'latestIndicators', 'latestWatchlist', 'globalWatchlist'])
       .then((res: Record<string, unknown>) => {
+        if (res.stockRegistry) renderStockManager(res.stockRegistry as StockRegistryState);
         if (res.latestSnapshot) renderDrawings(res.latestSnapshot as ChartSnapshot);
         if (res.latestIndicators) renderIndicators(res.latestIndicators as IndicatorsSnapshot);
-        if (res.latestWatchlist) renderWatchlist(res.latestWatchlist as WatchlistSnapshot);
+        if (res.globalWatchlist) {
+          renderWatchlist(res.globalWatchlist as WatchlistSnapshot);
+        } else if (res.latestWatchlist) {
+          renderWatchlist(res.latestWatchlist as WatchlistSnapshot);
+        }
       })
       .catch((err) => {
         console.warn('[Stock Chart Extractor] Failed to read cached snapshots:', err);
@@ -369,23 +490,14 @@ function initSidePanel() {
     console.warn('[Stock Chart Extractor] Storage access error:', err);
   }
 
-  // 5. Request fresh sync immediately and staggered
+  // 5. Staggered sync requests
   sendSyncRequest(btnSync || undefined);
   setTimeout(() => sendSyncRequest(), 400);
   setTimeout(() => sendSyncRequest(), 1200);
   setTimeout(() => sendSyncRequest(), 2500);
-
-  // 6. Keep retrying sync if still initializing after 3 seconds
-  const autoRetryTimer = setInterval(() => {
-    if (!currentDrawingsSnapshot && !currentIndicatorsSnapshot && !currentWatchlistSnapshot) {
-      sendSyncRequest();
-    } else {
-      clearInterval(autoRetryTimer);
-    }
-  }, 2000);
 }
 
-// Ensure initSidePanel runs reliably across all browser execution timings
+// Ensure initSidePanel runs reliably
 console.log('[Stock Chart Extractor][SidePanel] Loading main.ts script (readyState: ' + document.readyState + ')');
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', initSidePanel);
@@ -401,7 +513,9 @@ browser.runtime.onMessage.addListener((message: unknown) => {
   const parsed = ExtensionMessageSchema.safeParse(message);
   if (!parsed.success) return;
 
-  if (parsed.data.type === 'DRAWINGS_SNAPSHOT') {
+  if (parsed.data.type === 'STOCK_REGISTRY_UPDATED') {
+    renderStockManager(parsed.data.payload as StockRegistryState);
+  } else if (parsed.data.type === 'DRAWINGS_SNAPSHOT') {
     renderDrawings(parsed.data.payload as ChartSnapshot);
   } else if (parsed.data.type === 'INDICATORS_SNAPSHOT') {
     renderIndicators(parsed.data.payload as IndicatorsSnapshot);
@@ -415,13 +529,19 @@ browser.runtime.onMessage.addListener((message: unknown) => {
 // ----------------------------------------------------
 browser.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== 'local') return;
+
+  if (changes.stockRegistry?.newValue) {
+    renderStockManager(changes.stockRegistry.newValue as StockRegistryState);
+  }
   if (changes.latestSnapshot?.newValue) {
     renderDrawings(changes.latestSnapshot.newValue as ChartSnapshot);
   }
   if (changes.latestIndicators?.newValue) {
     renderIndicators(changes.latestIndicators.newValue as IndicatorsSnapshot);
   }
-  if (changes.latestWatchlist?.newValue) {
+  if (changes.globalWatchlist?.newValue) {
+    renderWatchlist(changes.globalWatchlist.newValue as WatchlistSnapshot);
+  } else if (changes.latestWatchlist?.newValue) {
     renderWatchlist(changes.latestWatchlist.newValue as WatchlistSnapshot);
   }
 });
@@ -430,7 +550,8 @@ browser.storage.onChanged.addListener((changes, areaName) => {
 // DIAGNOSTIC EXPOSURE IN SIDE PANEL WINDOW
 // ----------------------------------------------------
 (window as any).__STOCK_CHART_EXTRACTOR__ = {
-  version: '1.0.0 (SidePanel)',
+  version: '2.0.0 (SidePanel Multi-Stock)',
+  getRegistry: () => currentRegistryState,
   getDrawings: () => currentDrawingsSnapshot,
   getIndicators: () => currentIndicatorsSnapshot,
   getWatchlist: () => currentWatchlistSnapshot,
@@ -440,15 +561,17 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     return {
       context: 'SidePanel',
       badge: badgeText,
+      stocksCount: Object.keys(currentRegistryState?.items || {}).length,
+      activeSymbol: currentRegistryState?.activeSymbol || null,
       drawingsCount: currentDrawingsSnapshot?.drawings?.length ?? 0,
       indicatorsCount: currentIndicatorsSnapshot?.items?.length ?? 0,
       watchlistCount: currentWatchlistSnapshot?.activeItems?.length ?? 0,
       cachedSnapshots: {
+        registry: Boolean(currentRegistryState),
         drawings: Boolean(currentDrawingsSnapshot),
         indicators: Boolean(currentIndicatorsSnapshot),
         watchlist: Boolean(currentWatchlistSnapshot),
       },
-      hint: 'If running from FireAnt web tab, ensure DevTools dropdown is set to top and page is refreshed.',
     };
   },
 };

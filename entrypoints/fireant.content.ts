@@ -92,6 +92,19 @@ export default defineContentScript({
             browser.runtime.sendMessage(message).catch(() => {});
           } catch {}
         }
+
+        if (message.type === 'CHART_CONTEXT_CHANGED') {
+          console.log(`[Stock Chart Extractor][Isolated World] 📍 Relaying Chart Context: ${(message.payload as any)?.compositeKey}`);
+          try {
+            browser.runtime.sendMessage(message).catch(() => {});
+          } catch {}
+        }
+
+        if (message.type === 'ISOLATED_CHART_SNAPSHOT') {
+          try {
+            browser.runtime.sendMessage(message).catch(() => {});
+          } catch {}
+        }
       });
 
       // 2. Listen for messages from Extension Runtime (Side Panel) -> forward to Main World Bridge

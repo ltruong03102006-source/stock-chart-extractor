@@ -193,6 +193,37 @@
       </div>
     </header>
 
+    <!-- AREA A: STOCK MANAGER -->
+    <div class="card" style="margin-bottom: 12px; border-color: #3b82f6;">
+      <div class="card-title" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+        <span style="color: #60a5fa; font-weight: 700; font-size: 11px;">STOCK MANAGER</span>
+        <span id="stock-manager-count" class="badge badge-pane-main">0 stocks</span>
+      </div>
+      <div style="display: flex; gap: 6px; margin-bottom: 8px;">
+        <input
+          id="input-manual-symbol"
+          type="text"
+          placeholder="Thêm mã (ví dụ: FPT, VIC)..."
+          maxlength="10"
+          style="flex: 1; background: var(--bg-tertiary); border: 1px solid var(--border-color); color: var(--text-primary); padding: 6px 10px; border-radius: 6px; font-weight: 600; font-size: 12px; text-transform: uppercase;"
+        />
+        <button id="btn-add-stock" class="btn-action" style="padding: 6px 12px;">+ Thêm</button>
+      </div>
+      <div id="stock-manager-list" class="scrollable-list" style="max-height: 150px;">
+        <div style="color: var(--text-secondary); text-align: center; padding: 12px; font-size: 11px;">
+          Chưa có mã nào trong danh sách quản lý...
+        </div>
+      </div>
+    </div>
+
+    <!-- AREA B: SELECTED STOCK DETAIL -->
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; padding: 0 4px;">
+      <div style="font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase;">
+        CHI TIẾT MÃ: <span id="selected-stock-title" style="color: var(--accent-blue);">---</span>
+      </div>
+      <div id="selected-stock-badges"></div>
+    </div>
+
     <!-- Navigation Tabs -->
     <nav class="tabs-nav">
       <button class="tab-btn active" data-tab="tab-drawings">
@@ -236,6 +267,7 @@
         <pre id="json-viewer-drawings">// Drawings JSON syncs here in real-time</pre>
         <div class="actions">
           <button id="btn-copy-drawings" class="btn-action">Copy Drawings JSON</button>
+          <button id="btn-export-all" class="btn-action" style="background-color: #059669;">Export All JSON</button>
           <button id="btn-sync" class="btn-action" style="background-color: var(--bg-tertiary);">Request Sync</button>
         </div>
       </div>

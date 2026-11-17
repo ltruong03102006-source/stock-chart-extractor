@@ -1,4 +1,4 @@
-import { EXTENSION_SOURCE, type ChartSnapshot, type DrawingObject } from '@/src/messaging/message.types';
+import { EXTENSION_SOURCE, type ChartSnapshot, type DrawingObject, type IsolatedChartSnapshot } from '@/src/messaging/message.types';
 import { extractDrawing } from '@/src/extractors/extractor.factory';
 import { extractSafePoints } from '@/src/extractors/base.extractor';
 import { extractAllIndicators } from '@/src/extractors/indicators/indicator.extractor';
@@ -73,7 +73,7 @@ export default defineContentScript({
      */
     function buildSnapshot(): ChartSnapshot {
       let symbol = 'UNKNOWN';
-      let timeframe = '';
+      let timeframe = 'D';
       let drawings: DrawingObject[] = [];
 
       try {
@@ -82,8 +82,14 @@ export default defineContentScript({
         if (widget && typeof widget.model === 'function') {
           const model = widget.model()?.m_model;
           if (model) {
-            if (typeof model.mainSeries === 'function' && model.mainSeries()?.symbol) {
-              symbol = String(model.mainSeries().symbol());
+            if (typeof model.mainSeries === 'function') {
+              const ms = model.mainSeries();
+              if (typeof ms?.symbol === 'function') {
+                symbol = String(ms.symbol());
+              }
+              if (typeof ms?.interval === 'function') {
+                timeframe = String(ms.interval());
+              }
             }
 
             if (typeof model.allLineTools === 'function') {
@@ -113,6 +119,156 @@ export default defineContentScript({
           totalDrawings: drawings.length,
         },
       };
+    }
+
+    let lastContextKey = '';
+    let currentGenerationId = 0;
+
+    /**
+     * Detects active chart symbol, timeframe, exchange and broadcasts changes
+     */
+    function detectAndBroadcastContext() {
+      try {
+        const found = locateChartWidget();
+        const widget = found?.widget || activeChartWidget;
+        if (!widget || typeof widget.model !== 'function') return null;
+
+        const model = widget.model()?.m_model;
+        if (!model) return null;
+
+        let symbol = 'UNKNOWN';
+        let timeframe = 'D';
+        let exchange = 'VN';
+
+        if (typeof model.mainSeries === 'function') {
+          const ms = model.mainSeries();
+          if (typeof ms.symbol === 'function') {
+            const rawSym = ms.symbol();
+            if (rawSym) symbol = String(rawSym);
+          }
+          if (typeof ms.interval === 'function') {
+            const rawInt = ms.interval();
+            if (rawInt) timeframe = String(rawInt);
+          }
+          if (typeof ms.symbolInfo === 'function') {
+            const info = ms.symbolInfo();
+            if (info?.exchange) exchange = String(info.exchange);
+          }
+        }
+
+        if (symbol.includes(':')) {
+          const parts = symbol.split(':');
+          if (parts[0]) exchange = parts[0];
+          if (parts[1]) symbol = parts[1];
+        }
+
+        const cleanSymbol = symbol.trim().toUpperCase();
+        if (!cleanSymbol || cleanSymbol === 'UNKNOWN') return null;
+
+        const compositeKey = `${cleanSymbol}_${exchange.toUpperCase()}_${timeframe.toUpperCase()}`;
+        const chartId = 'chart-0';
+
+        if (compositeKey !== lastContextKey) {
+          currentGenerationId++;
+          console.log(`[Stock Chart Extractor][Main World] 🔄 Chart Context Changed: ${lastContextKey || 'none'} -> ${compositeKey} (gen: ${currentGenerationId})`);
+          lastContextKey = compositeKey;
+
+          window.postMessage(
+            {
+              source: EXTENSION_SOURCE,
+              type: 'CHART_CONTEXT_CHANGED',
+              payload: {
+                symbol: cleanSymbol,
+                exchange: exchange.toUpperCase(),
+                timeframe: timeframe.toUpperCase(),
+                chartId,
+                compositeKey,
+              },
+              timestamp: Date.now(),
+            },
+            '*'
+          );
+        }
+
+        return {
+          symbol: cleanSymbol,
+          exchange: exchange.toUpperCase(),
+          timeframe: timeframe.toUpperCase(),
+          chartId,
+          compositeKey,
+        };
+      } catch (err) {
+        console.warn('[Stock Chart Extractor] Error detecting chart context:', err);
+        return null;
+      }
+    }
+
+    /**
+     * Builds an isolated chart snapshot containing both drawings and indicators tagged with composite key
+     */
+    function buildIsolatedSnapshot(): IsolatedChartSnapshot | null {
+      const ctx = detectAndBroadcastContext();
+      if (!ctx) return null;
+
+      let drawings: DrawingObject[] = [];
+      let indicators: any[] = [];
+
+      try {
+        const found = locateChartWidget();
+        const widget = found?.widget || activeChartWidget;
+        if (widget && typeof widget.model === 'function') {
+          const model = widget.model()?.m_model;
+          if (model) {
+            if (typeof model.allLineTools === 'function') {
+              const rawTools = model.allLineTools();
+              if (Array.isArray(rawTools)) {
+                drawings = rawTools.map((t) => extractDrawing(t));
+              }
+            }
+
+            const indSnapshot = extractAllIndicators(model);
+            if (Array.isArray(indSnapshot?.items)) {
+              indicators = indSnapshot.items;
+            }
+          }
+        }
+      } catch (err) {
+        console.error('[Stock Chart Extractor] Error extracting isolated snapshot:', err);
+      }
+
+      return {
+        version: '2.0',
+        context: ctx,
+        compositeKey: ctx.compositeKey,
+        generationId: currentGenerationId,
+        drawings,
+        indicators,
+        drawingsCount: drawings.length,
+        indicatorsCount: indicators.length,
+        extractedAt: Date.now(),
+      };
+    }
+
+    /**
+     * Broadcasts isolated chart snapshot to Isolated World Content Script
+     */
+    function broadcastIsolatedSnapshot() {
+      try {
+        const isolated = buildIsolatedSnapshot();
+        if (!isolated) return;
+
+        window.postMessage(
+          {
+            source: EXTENSION_SOURCE,
+            type: 'ISOLATED_CHART_SNAPSHOT',
+            payload: isolated,
+            timestamp: Date.now(),
+          },
+          '*'
+        );
+      } catch (err) {
+        console.warn('[Stock Chart Extractor] broadcastIsolatedSnapshot error:', err);
+      }
     }
 
     /**
@@ -505,7 +661,9 @@ export default defineContentScript({
       if (syncIntervalStarted) return;
       syncIntervalStarted = true;
       setInterval(() => {
+        detectAndBroadcastContext();
         broadcastSnapshot();
+        broadcastIsolatedSnapshot();
         broadcastIndicators();
         if (isTopFrame) broadcastWatchlist();
       }, 1000);
@@ -525,8 +683,10 @@ export default defineContentScript({
           console.log(`[Stock Chart Extractor][Main World] ✅ SUCCESS: Connected to chart widget at [${found.location}]!`);
           logToolsInventory(tools);
 
-          // Broadcast initial snapshots
+          // Detect active context and broadcast initial snapshots
+          detectAndBroadcastContext();
           broadcastSnapshot();
+          broadcastIsolatedSnapshot();
           broadcastIndicators();
           if (isTopFrame) broadcastWatchlist();
 
@@ -576,7 +736,9 @@ export default defineContentScript({
             activeChartWidget = lateFound.widget;
           }
         }
+        detectAndBroadcastContext();
         broadcastSnapshot();
+        broadcastIsolatedSnapshot();
         broadcastIndicators();
         if (isTopFrame) broadcastWatchlist();
       } else if (event.data.type === 'REQUEST_INDICATORS_SYNC') {

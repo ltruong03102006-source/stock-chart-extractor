@@ -11,6 +11,11 @@ import {
   WatchlistItemSchema,
   WatchlistGroupSchema,
   WatchlistSnapshotSchema,
+  ChartContextSummarySchema,
+  StockRegistryItemSchema,
+  StockRegistryStateSchema,
+  ChartContextPayloadSchema,
+  IsolatedChartSnapshotSchema,
 } from './message.schemas';
 
 export type DrawingPoint = z.infer<typeof DrawingPointSchema>;
@@ -25,5 +30,11 @@ export type IndicatorsSnapshot = z.infer<typeof IndicatorsSnapshotSchema>;
 export type WatchlistItem = z.infer<typeof WatchlistItemSchema>;
 export type WatchlistGroup = z.infer<typeof WatchlistGroupSchema>;
 export type WatchlistSnapshot = z.infer<typeof WatchlistSnapshotSchema>;
+
+export type ChartContextSummary = z.infer<typeof ChartContextSummarySchema>;
+export type StockRegistryItem = z.infer<typeof StockRegistryItemSchema>;
+export type StockRegistryState = z.infer<typeof StockRegistryStateSchema>;
+export type ChartContextPayload = z.infer<typeof ChartContextPayloadSchema>;
+export type IsolatedChartSnapshot = z.infer<typeof IsolatedChartSnapshotSchema>;
 
 export const EXTENSION_SOURCE = 'STOCK_CHART_EXTRACTOR' as const;
