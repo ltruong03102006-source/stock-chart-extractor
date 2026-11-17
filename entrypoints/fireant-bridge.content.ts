@@ -68,6 +68,21 @@ export default defineContentScript({
       return null;
     }
 
+    let lastDrawingsSignature = '';
+    let lastDrawingsTimestamp = Date.now();
+    let lastBroadcastDrawingsSig = '';
+    let lastBroadcastIsolatedSig = '';
+    let lastIndicatorsSignature = '';
+    let lastWatchlistSignature = '';
+
+    function computeDrawingsSignature(symbol: string, timeframe: string, drawings: DrawingObject[]): string {
+      return `${symbol}_${timeframe}:` + drawings.map((d) => {
+        const pts = (d.points || []).map((p) => `${p.price !== undefined ? Number(p.price).toFixed(2) : ''}@${p.index ?? p.time ?? ''}`).join(',');
+        const st = `${d.style?.linecolor ?? d.style?.color ?? ''}_${d.style?.linewidth ?? ''}_${d.style?.backgroundColor ?? ''}`;
+        return `${d.id}:${pts}:${st}:${d.visible}:${d.locked}`;
+      }).join('|');
+    }
+
     /**
      * Builds a complete snapshot of all active line tools
      */
@@ -104,6 +119,12 @@ export default defineContentScript({
         console.error('[Stock Chart Extractor] Error reading chart model:', err);
       }
 
+      const sig = computeDrawingsSignature(symbol, timeframe, drawings);
+      if (sig !== lastDrawingsSignature) {
+        lastDrawingsSignature = sig;
+        lastDrawingsTimestamp = Date.now();
+      }
+
       return {
         schemaVersion: '1.0',
         platform: 'fireant',
@@ -115,7 +136,7 @@ export default defineContentScript({
         drawings,
         sync: {
           status: (activeChartWidget || locateChartWidget()) ? 'synced' : 'initializing',
-          lastUpdated: Date.now(),
+          lastUpdated: lastDrawingsTimestamp,
           totalDrawings: drawings.length,
         },
       };
@@ -252,10 +273,16 @@ export default defineContentScript({
     /**
      * Broadcasts isolated chart snapshot to Isolated World Content Script
      */
-    function broadcastIsolatedSnapshot() {
+    function broadcastIsolatedSnapshot(force = false) {
       try {
         const isolated = buildIsolatedSnapshot();
         if (!isolated) return;
+
+        const sig = `${isolated.compositeKey}:${lastDrawingsSignature}:${lastIndicatorsSignature}`;
+        if (!force && sig === lastBroadcastIsolatedSig) {
+          return;
+        }
+        lastBroadcastIsolatedSig = sig;
 
         window.postMessage(
           {
@@ -274,9 +301,15 @@ export default defineContentScript({
     /**
      * Broadcast snapshot to Isolated World Content Script via window.postMessage
      */
-    function broadcastSnapshot() {
+    function broadcastSnapshot(force = false) {
       try {
         const snapshot = buildSnapshot();
+        const sig = lastDrawingsSignature;
+        if (!force && sig === lastBroadcastDrawingsSig) {
+          return;
+        }
+        lastBroadcastDrawingsSig = sig;
+
         window.postMessage(
           {
             source: EXTENSION_SOURCE,
@@ -294,7 +327,7 @@ export default defineContentScript({
     /**
      * Broadcast indicators snapshot
      */
-    function broadcastIndicators() {
+    function broadcastIndicators(force = false) {
       try {
         const found = locateChartWidget();
         const widget = found?.widget || activeChartWidget;
@@ -302,6 +335,12 @@ export default defineContentScript({
         if (!model) return;
 
         const indicatorsSnapshot = extractAllIndicators(model);
+        const sig = (indicatorsSnapshot.items || []).map((i) => `${i.id}:${JSON.stringify(i.inputs)}:${JSON.stringify(i.style)}`).join('|');
+        if (!force && sig === lastIndicatorsSignature) {
+          return;
+        }
+        lastIndicatorsSignature = sig;
+
         window.postMessage(
           {
             source: EXTENSION_SOURCE,
@@ -319,11 +358,17 @@ export default defineContentScript({
     /**
      * Broadcast watchlist snapshot
      */
-    function broadcastWatchlist() {
+    function broadcastWatchlist(force = false) {
       try {
         if (!isTopFrame) return;
 
         const watchlistSnapshot = extractWatchlists();
+        const sig = JSON.stringify(watchlistSnapshot.watchlists || []);
+        if (!force && sig === lastWatchlistSignature) {
+          return;
+        }
+        lastWatchlistSignature = sig;
+
         window.postMessage(
           {
             source: EXTENSION_SOURCE,
@@ -737,14 +782,14 @@ export default defineContentScript({
           }
         }
         detectAndBroadcastContext();
-        broadcastSnapshot();
-        broadcastIsolatedSnapshot();
-        broadcastIndicators();
-        if (isTopFrame) broadcastWatchlist();
+        broadcastSnapshot(true);
+        broadcastIsolatedSnapshot(true);
+        broadcastIndicators(true);
+        if (isTopFrame) broadcastWatchlist(true);
       } else if (event.data.type === 'REQUEST_INDICATORS_SYNC') {
-        broadcastIndicators();
+        broadcastIndicators(true);
       } else if (event.data.type === 'REQUEST_WATCHLIST_SYNC') {
-        if (isTopFrame) broadcastWatchlist();
+        if (isTopFrame) broadcastWatchlist(true);
       }
     });
   },

@@ -15,6 +15,15 @@ let currentIndicatorsSnapshot: IndicatorsSnapshot | null = null;
 let currentWatchlistSnapshot: WatchlistSnapshot | null = null;
 let updateCounter = 0;
 
+// Smart DOM diffing caches to prevent UI jitter/flicker
+let lastRenderedDrawingsJson = '';
+let lastRenderedDrawingsListHtml = '';
+let lastRenderedIndicatorsJson = '';
+let lastRenderedIndicatorsListHtml = '';
+let lastRenderedWatchlistJson = '';
+let lastRenderedWatchlistListHtml = '';
+let lastRenderedStockManagerHtml = '';
+
 function updateBadge() {
   updateCounter++;
   const badgeEl = document.getElementById('sync-badge');
@@ -30,7 +39,6 @@ function updateBadge() {
 function renderStockManager(registry: StockRegistryState) {
   if (!registry) return;
   currentRegistryState = registry;
-  updateBadge();
 
   const countEl = document.getElementById('stock-manager-count');
   const listEl = document.getElementById('stock-manager-list');
@@ -38,113 +46,125 @@ function renderStockManager(registry: StockRegistryState) {
   const selectedStockBadgesEl = document.getElementById('selected-stock-badges');
 
   const stocks = getAllStocks(registry);
-  if (countEl) countEl.textContent = `${stocks.length} mã`;
+  const countStr = `${stocks.length} mã`;
+  if (countEl && countEl.textContent !== countStr) countEl.textContent = countStr;
 
   const activeItem = registry.activeSymbol ? registry.items[registry.activeSymbol] : null;
   if (selectedStockTitleEl) {
+    let nextTitle = '---';
     if (activeItem) {
       const activeCtx = activeItem.chartContexts[0];
       const tfText = activeCtx ? ` • Khung: ${activeCtx.timeframe}` : '';
       const exText = activeItem.exchange ? ` • ${activeItem.exchange}` : '';
-      selectedStockTitleEl.textContent = `${activeItem.symbol}${exText}${tfText}`;
-    } else {
-      selectedStockTitleEl.textContent = '---';
+      nextTitle = `${activeItem.symbol}${exText}${tfText}`;
+    }
+    if (selectedStockTitleEl.textContent !== nextTitle) {
+      selectedStockTitleEl.textContent = nextTitle;
     }
   }
 
-  if (selectedStockBadgesEl && activeItem) {
-    selectedStockBadgesEl.innerHTML = `
-      <span class="badge ${activeItem.isActive ? 'badge-synced' : 'badge-pane-main'}">
-        ${activeItem.isActive ? '● Active' : '○ Opened'}
-      </span>
-    `;
+  if (selectedStockBadgesEl) {
+    const nextBadges = activeItem
+      ? `<span class="badge ${activeItem.isActive ? 'badge-synced' : 'badge-pane-main'}">
+          ${activeItem.isActive ? '● Active' : '○ Opened'}
+        </span>`
+      : '';
+    if (selectedStockBadgesEl.innerHTML !== nextBadges) {
+      selectedStockBadgesEl.innerHTML = nextBadges;
+    }
   }
 
   if (listEl) {
+    let nextHtml = '';
     if (stocks.length === 0) {
-      listEl.innerHTML = `
+      nextHtml = `
         <div style="color: var(--text-secondary); text-align: center; padding: 12px; font-size: 11px;">
           Chưa có mã nào trong danh sách quản lý...
         </div>
       `;
-      return;
+    } else {
+      nextHtml = stocks
+        .map((item) => {
+          const isCurrent = item.symbol === registry.activeSymbol;
+          const activeCtx = item.chartContexts[0];
+          const drawingsCount = activeCtx ? activeCtx.drawingsCount : 0;
+          const indicatorsCount = activeCtx ? activeCtx.indicatorsCount : 0;
+
+          let statusBadge = '';
+          if (item.isActive) {
+            statusBadge = '<span class="badge badge-synced" style="font-size: 10px;">● Active Chart</span>';
+          } else if (item.isOpened) {
+            statusBadge = '<span class="badge badge-pane-main" style="font-size: 10px;">○ FireAnt</span>';
+          } else {
+            statusBadge = '<span class="badge" style="background:#334155;color:#94a3b8;font-size:10px;">○ Manual</span>';
+          }
+
+          const borderStyle = isCurrent ? 'border-left: 3px solid #38bdf8; background: #1e293b;' : '';
+
+          return `
+            <div class="list-item stock-row" data-symbol="${item.symbol}" style="cursor: pointer; ${borderStyle}">
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <span class="tag-symbol">${item.symbol}</span>
+                ${statusBadge}
+                <span style="color: var(--text-secondary); font-size: 10px;">
+                  ${drawingsCount > 0 ? `${drawingsCount}d` : ''} ${indicatorsCount > 0 ? `${indicatorsCount}i` : ''}
+                </span>
+              </div>
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <button class="btn-delete-stock" data-symbol="${item.symbol}" title="Xóa mã khỏi danh sách quản lý" style="background: transparent; border: none; color: #ef4444; font-size: 14px; cursor: pointer; padding: 2px 6px; border-radius: 4px;">&times;</button>
+              </div>
+            </div>
+          `;
+        })
+        .join('');
     }
 
-    listEl.innerHTML = stocks
-      .map((item) => {
-        const isCurrent = item.symbol === registry.activeSymbol;
-        const activeCtx = item.chartContexts[0];
-        const drawingsCount = activeCtx ? activeCtx.drawingsCount : 0;
-        const indicatorsCount = activeCtx ? activeCtx.indicatorsCount : 0;
+    if (nextHtml !== lastRenderedStockManagerHtml) {
+      lastRenderedStockManagerHtml = nextHtml;
+      const scrollPos = listEl.scrollTop;
+      listEl.innerHTML = nextHtml;
+      listEl.scrollTop = scrollPos;
 
-        let statusBadge = '';
-        if (item.isActive) {
-          statusBadge = '<span class="badge badge-synced" style="font-size: 10px;">● Active Chart</span>';
-        } else if (item.isOpened) {
-          statusBadge = '<span class="badge badge-pane-main" style="font-size: 10px;">○ FireAnt</span>';
-        } else {
-          statusBadge = '<span class="badge" style="background:#334155;color:#94a3b8;font-size:10px;">○ Manual</span>';
-        }
-
-        const borderStyle = isCurrent ? 'border-left: 3px solid #38bdf8; background: #1e293b;' : '';
-
-        return `
-          <div class="list-item stock-row" data-symbol="${item.symbol}" style="cursor: pointer; ${borderStyle}">
-            <div style="display: flex; align-items: center; gap: 6px;">
-              <span class="tag-symbol">${item.symbol}</span>
-              ${statusBadge}
-              <span style="color: var(--text-secondary); font-size: 10px;">
-                ${drawingsCount > 0 ? `${drawingsCount}d` : ''} ${indicatorsCount > 0 ? `${indicatorsCount}i` : ''}
-              </span>
-            </div>
-            <div style="display: flex; align-items: center; gap: 6px;">
-              <button class="btn-delete-stock" data-symbol="${item.symbol}" title="Xóa mã khỏi danh sách quản lý" style="background: transparent; border: none; color: #ef4444; font-size: 14px; cursor: pointer; padding: 2px 6px; border-radius: 4px;">&times;</button>
-            </div>
-          </div>
-        `;
-      })
-      .join('');
-
-    // Attach row click to select active stock
-    listEl.querySelectorAll('.stock-row').forEach((row) => {
-      row.addEventListener('click', (e) => {
-        const target = e.target as HTMLElement;
-        if (target.classList.contains('btn-delete-stock')) return;
-        const symbol = row.getAttribute('data-symbol');
-        if (symbol) {
-          browser.runtime.sendMessage({
-            source: EXTENSION_SOURCE,
-            type: 'SET_ACTIVE_STOCK',
-            payload: { symbol },
-          }).catch(() => {});
-        }
+      // Attach row click to select active stock
+      listEl.querySelectorAll('.stock-row').forEach((row) => {
+        row.addEventListener('click', (e) => {
+          const target = e.target as HTMLElement;
+          if (target.classList.contains('btn-delete-stock')) return;
+          const symbol = row.getAttribute('data-symbol');
+          if (symbol) {
+            browser.runtime.sendMessage({
+              source: EXTENSION_SOURCE,
+              type: 'SET_ACTIVE_STOCK',
+              payload: { symbol },
+            }).catch(() => {});
+          }
+        });
       });
-    });
 
-    // Attach delete button click
-    listEl.querySelectorAll('.btn-delete-stock').forEach((btn) => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const symbol = btn.getAttribute('data-symbol');
-        if (symbol) {
-          browser.runtime.sendMessage({
-            source: EXTENSION_SOURCE,
-            type: 'REMOVE_MANUAL_STOCK',
-            payload: { symbol },
-          }).catch(() => {});
-        }
+      // Attach delete button click
+      listEl.querySelectorAll('.btn-delete-stock').forEach((btn) => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const symbol = btn.getAttribute('data-symbol');
+          if (symbol) {
+            browser.runtime.sendMessage({
+              source: EXTENSION_SOURCE,
+              type: 'REMOVE_MANUAL_STOCK',
+              payload: { symbol },
+            }).catch(() => {});
+          }
+        });
       });
-    });
+    }
   }
 }
 
 // ----------------------------------------------------
-// TAB 1: DRAWINGS RENDERER
+// TAB 1: DRAWINGS RENDERER (SMART DIFFING)
 // ----------------------------------------------------
 function renderDrawings(snapshot: ChartSnapshot) {
   if (!snapshot) return;
   currentDrawingsSnapshot = snapshot;
-  updateBadge();
 
   const symbolEl = document.getElementById('stat-symbol');
   const countEl = document.getElementById('stat-count');
@@ -152,20 +172,27 @@ function renderDrawings(snapshot: ChartSnapshot) {
   const drawingListEl = document.getElementById('drawing-list');
   const jsonViewerDrawingsEl = document.getElementById('json-viewer-drawings');
 
-  if (symbolEl) symbolEl.textContent = snapshot.chart?.symbol || '---';
-  const total = snapshot.drawings?.length ?? 0;
-  if (countEl) countEl.textContent = String(total);
-  if (tabCountDrawingsEl) tabCountDrawingsEl.textContent = String(total);
+  const symbol = snapshot.chart?.symbol || '---';
+  if (symbolEl && symbolEl.textContent !== symbol) {
+    symbolEl.textContent = symbol;
+  }
 
+  const total = snapshot.drawings?.length ?? 0;
+  const totalStr = String(total);
+  if (countEl && countEl.textContent !== totalStr) countEl.textContent = totalStr;
+  if (tabCountDrawingsEl && tabCountDrawingsEl.textContent !== totalStr) tabCountDrawingsEl.textContent = totalStr;
+
+  // 1. Render Drawing List only if content actually changed
   if (drawingListEl) {
+    let nextListHtml = '';
     if (!snapshot.drawings || snapshot.drawings.length === 0) {
-      drawingListEl.innerHTML = `
+      nextListHtml = `
         <div style="color: var(--text-secondary); text-align: center; padding: 12px;">
           Chưa có hình vẽ nào trên biểu đồ. Hãy thử vẽ trên FireAnt!
         </div>
       `;
     } else {
-      drawingListEl.innerHTML = snapshot.drawings
+      nextListHtml = snapshot.drawings
         .map(
           (d) => `
           <div class="list-item">
@@ -181,20 +208,34 @@ function renderDrawings(snapshot: ChartSnapshot) {
         )
         .join('');
     }
+
+    if (nextListHtml !== lastRenderedDrawingsListHtml) {
+      lastRenderedDrawingsListHtml = nextListHtml;
+      const scrollPos = drawingListEl.scrollTop;
+      drawingListEl.innerHTML = nextListHtml;
+      drawingListEl.scrollTop = scrollPos;
+    }
   }
 
+  // 2. Render JSON Viewer only if JSON content actually changed
   if (jsonViewerDrawingsEl) {
-    jsonViewerDrawingsEl.textContent = JSON.stringify(snapshot, null, 2);
+    const nextJson = JSON.stringify(snapshot, null, 2);
+    if (nextJson !== lastRenderedDrawingsJson) {
+      lastRenderedDrawingsJson = nextJson;
+      const scrollPos = jsonViewerDrawingsEl.scrollTop;
+      jsonViewerDrawingsEl.textContent = nextJson;
+      jsonViewerDrawingsEl.scrollTop = scrollPos;
+      updateBadge();
+    }
   }
 }
 
 // ----------------------------------------------------
-// TAB 2: INDICATORS RENDERER
+// TAB 2: INDICATORS RENDERER (SMART DIFFING)
 // ----------------------------------------------------
 function renderIndicators(snapshot: IndicatorsSnapshot) {
   if (!snapshot) return;
   currentIndicatorsSnapshot = snapshot;
-  updateBadge();
 
   const statIndicatorsCountEl = document.getElementById('stat-indicators-count');
   const tabCountIndicatorsEl = document.getElementById('tab-count-indicators');
@@ -204,22 +245,26 @@ function renderIndicators(snapshot: IndicatorsSnapshot) {
 
   const items = Array.isArray(snapshot.items) ? snapshot.items : [];
   const total = items.length;
-  if (statIndicatorsCountEl) statIndicatorsCountEl.textContent = String(total);
-  if (tabCountIndicatorsEl) tabCountIndicatorsEl.textContent = String(total);
+  const totalStr = String(total);
+  if (statIndicatorsCountEl && statIndicatorsCountEl.textContent !== totalStr) statIndicatorsCountEl.textContent = totalStr;
+  if (tabCountIndicatorsEl && tabCountIndicatorsEl.textContent !== totalStr) tabCountIndicatorsEl.textContent = totalStr;
 
   const mainCount = items.filter((i) => i.pane?.type === 'main').length;
   const sepCount = items.filter((i) => i.pane?.type === 'separate').length;
-  if (statIndicatorsPanesEl) statIndicatorsPanesEl.textContent = `${mainCount} / ${sepCount}`;
+  const panesStr = `${mainCount} / ${sepCount}`;
+  if (statIndicatorsPanesEl && statIndicatorsPanesEl.textContent !== panesStr) statIndicatorsPanesEl.textContent = panesStr;
 
+  // 1. Render Indicators List only if changed
   if (indicatorsListEl) {
+    let nextListHtml = '';
     if (items.length === 0) {
-      indicatorsListEl.innerHTML = `
+      nextListHtml = `
         <div style="color: var(--text-secondary); text-align: center; padding: 12px;">
           Chưa có chỉ báo nào trên biểu đồ.
         </div>
       `;
     } else {
-      indicatorsListEl.innerHTML = items
+      nextListHtml = items
         .map(
           (ind) => `
           <div class="list-item">
@@ -237,20 +282,34 @@ function renderIndicators(snapshot: IndicatorsSnapshot) {
         )
         .join('');
     }
+
+    if (nextListHtml !== lastRenderedIndicatorsListHtml) {
+      lastRenderedIndicatorsListHtml = nextListHtml;
+      const scrollPos = indicatorsListEl.scrollTop;
+      indicatorsListEl.innerHTML = nextListHtml;
+      indicatorsListEl.scrollTop = scrollPos;
+    }
   }
 
+  // 2. Render JSON Viewer only if changed
   if (jsonViewerIndicatorsEl) {
-    jsonViewerIndicatorsEl.textContent = JSON.stringify(snapshot, null, 2);
+    const nextJson = JSON.stringify(snapshot, null, 2);
+    if (nextJson !== lastRenderedIndicatorsJson) {
+      lastRenderedIndicatorsJson = nextJson;
+      const scrollPos = jsonViewerIndicatorsEl.scrollTop;
+      jsonViewerIndicatorsEl.textContent = nextJson;
+      jsonViewerIndicatorsEl.scrollTop = scrollPos;
+      updateBadge();
+    }
   }
 }
 
 // ----------------------------------------------------
-// TAB 3: WATCHLIST RENDERER (DECOUPLED GLOBAL DATA)
+// TAB 3: WATCHLIST RENDERER (SMART DIFFING)
 // ----------------------------------------------------
 function renderWatchlist(snapshot: WatchlistSnapshot) {
   if (!snapshot) return;
   currentWatchlistSnapshot = snapshot;
-  updateBadge();
 
   const statWatchlistNameEl = document.getElementById('stat-watchlist-name');
   const statWatchlistCountEl = document.getElementById('stat-watchlist-count');
@@ -261,20 +320,24 @@ function renderWatchlist(snapshot: WatchlistSnapshot) {
   const activeGroup = (snapshot.watchlists || []).find((g) => g.id === snapshot.activeWatchlistId) || snapshot.watchlists?.[0];
   const items = snapshot.activeItems || activeGroup?.items || [];
   const total = items.length;
+  const nameStr = activeGroup?.name || 'Mặc định';
+  const totalStr = String(total);
 
-  if (statWatchlistNameEl) statWatchlistNameEl.textContent = activeGroup?.name || 'Mặc định';
-  if (statWatchlistCountEl) statWatchlistCountEl.textContent = String(total);
-  if (tabCountWatchlistEl) tabCountWatchlistEl.textContent = String(total);
+  if (statWatchlistNameEl && statWatchlistNameEl.textContent !== nameStr) statWatchlistNameEl.textContent = nameStr;
+  if (statWatchlistCountEl && statWatchlistCountEl.textContent !== totalStr) statWatchlistCountEl.textContent = totalStr;
+  if (tabCountWatchlistEl && tabCountWatchlistEl.textContent !== totalStr) tabCountWatchlistEl.textContent = totalStr;
 
+  // 1. Render Watchlist List only if changed
   if (watchlistItemsListEl) {
+    let nextListHtml = '';
     if (items.length === 0) {
-      watchlistItemsListEl.innerHTML = `
+      nextListHtml = `
         <div style="color: var(--text-secondary); text-align: center; padding: 12px;">
           Chưa có danh mục theo dõi nào được tải.
         </div>
       `;
     } else {
-      watchlistItemsListEl.innerHTML = items
+      nextListHtml = items
         .map(
           (item) => `
           <div class="list-item">
@@ -290,10 +353,25 @@ function renderWatchlist(snapshot: WatchlistSnapshot) {
         )
         .join('');
     }
+
+    if (nextListHtml !== lastRenderedWatchlistListHtml) {
+      lastRenderedWatchlistListHtml = nextListHtml;
+      const scrollPos = watchlistItemsListEl.scrollTop;
+      watchlistItemsListEl.innerHTML = nextListHtml;
+      watchlistItemsListEl.scrollTop = scrollPos;
+    }
   }
 
+  // 2. Render JSON Viewer only if changed
   if (jsonViewerWatchlistEl) {
-    jsonViewerWatchlistEl.textContent = JSON.stringify(snapshot, null, 2);
+    const nextJson = JSON.stringify(snapshot, null, 2);
+    if (nextJson !== lastRenderedWatchlistJson) {
+      lastRenderedWatchlistJson = nextJson;
+      const scrollPos = jsonViewerWatchlistEl.scrollTop;
+      jsonViewerWatchlistEl.textContent = nextJson;
+      jsonViewerWatchlistEl.scrollTop = scrollPos;
+      updateBadge();
+    }
   }
 }
 
@@ -494,7 +572,6 @@ function initSidePanel() {
   sendSyncRequest(btnSync || undefined);
   setTimeout(() => sendSyncRequest(), 400);
   setTimeout(() => sendSyncRequest(), 1200);
-  setTimeout(() => sendSyncRequest(), 2500);
 }
 
 // Ensure initSidePanel runs reliably
