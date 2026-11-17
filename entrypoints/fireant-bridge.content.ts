@@ -119,55 +119,67 @@ export default defineContentScript({
      * Broadcast snapshot to Isolated World Content Script via window.postMessage
      */
     function broadcastSnapshot() {
-      const snapshot = buildSnapshot();
-      window.postMessage(
-        {
-          source: EXTENSION_SOURCE,
-          type: 'DRAWINGS_SNAPSHOT',
-          payload: snapshot,
-          timestamp: Date.now(),
-        },
-        '*'
-      );
+      try {
+        const snapshot = buildSnapshot();
+        window.postMessage(
+          {
+            source: EXTENSION_SOURCE,
+            type: 'DRAWINGS_SNAPSHOT',
+            payload: snapshot,
+            timestamp: Date.now(),
+          },
+          '*'
+        );
+      } catch (err) {
+        console.warn('[Stock Chart Extractor] broadcastSnapshot error:', err);
+      }
     }
 
     /**
      * Broadcast indicators snapshot
      */
     function broadcastIndicators() {
-      const found = locateChartWidget();
-      const widget = found?.widget || activeChartWidget;
-      const model = widget?.model()?.m_model;
-      if (!model) return;
+      try {
+        const found = locateChartWidget();
+        const widget = found?.widget || activeChartWidget;
+        const model = widget?.model()?.m_model;
+        if (!model) return;
 
-      const indicatorsSnapshot = extractAllIndicators(model);
-      window.postMessage(
-        {
-          source: EXTENSION_SOURCE,
-          type: 'INDICATORS_SNAPSHOT',
-          payload: indicatorsSnapshot,
-          timestamp: Date.now(),
-        },
-        '*'
-      );
+        const indicatorsSnapshot = extractAllIndicators(model);
+        window.postMessage(
+          {
+            source: EXTENSION_SOURCE,
+            type: 'INDICATORS_SNAPSHOT',
+            payload: indicatorsSnapshot,
+            timestamp: Date.now(),
+          },
+          '*'
+        );
+      } catch (err) {
+        console.warn('[Stock Chart Extractor] broadcastIndicators error:', err);
+      }
     }
 
     /**
      * Broadcast watchlist snapshot
      */
     function broadcastWatchlist() {
-      if (!isTopFrame) return;
+      try {
+        if (!isTopFrame) return;
 
-      const watchlistSnapshot = extractWatchlists();
-      window.postMessage(
-        {
-          source: EXTENSION_SOURCE,
-          type: 'WATCHLIST_SNAPSHOT',
-          payload: watchlistSnapshot,
-          timestamp: Date.now(),
-        },
-        '*'
-      );
+        const watchlistSnapshot = extractWatchlists();
+        window.postMessage(
+          {
+            source: EXTENSION_SOURCE,
+            type: 'WATCHLIST_SNAPSHOT',
+            payload: watchlistSnapshot,
+            timestamp: Date.now(),
+          },
+          '*'
+        );
+      } catch (err) {
+        console.warn('[Stock Chart Extractor] broadcastWatchlist error:', err);
+      }
     }
 
     /**

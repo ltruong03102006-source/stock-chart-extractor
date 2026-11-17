@@ -58,15 +58,15 @@ export default defineContentScript({
             if (Array.isArray(drawings) && drawings.length > 0 && !isInitial) {
               console.log(`[Stock Chart Extractor][Isolated World] Updated snapshot signature:`, currentSignature.slice(0, 100) + '...');
             }
+          }
 
-            // Relay to background service worker and side panel on actual change
-            try {
-              browser.runtime.sendMessage(message).catch(() => {
-                // Ignore if no active listener
-              });
-            } catch {
-              // Ignore if context is invalidated
-            }
+          // Always relay to extension runtime (Side Panel & Background)
+          try {
+            browser.runtime.sendMessage(message).catch(() => {
+              // Ignore if no active listener
+            });
+          } catch {
+            // Ignore if context is invalidated
           }
         }
 
@@ -77,10 +77,12 @@ export default defineContentScript({
           if (currentSignature !== lastIndicatorsSignature) {
             lastIndicatorsSignature = currentSignature;
             console.log(`[Stock Chart Extractor][Isolated World] 📊 Indicators Updated: ${items.length} item(s)`);
-            try {
-              browser.runtime.sendMessage(message).catch(() => {});
-            } catch {}
           }
+
+          // Always relay to extension runtime
+          try {
+            browser.runtime.sendMessage(message).catch(() => {});
+          } catch {}
         }
 
         if (message.type === 'WATCHLIST_SNAPSHOT') {
@@ -89,10 +91,12 @@ export default defineContentScript({
           if (currentSignature !== lastWatchlistSignature) {
             lastWatchlistSignature = currentSignature;
             console.log(`[Stock Chart Extractor][Isolated World] 📋 Watchlist Updated: ${snapshot?.activeItems?.length || 0} symbol(s)`);
-            try {
-              browser.runtime.sendMessage(message).catch(() => {});
-            } catch {}
           }
+
+          // Always relay to extension runtime
+          try {
+            browser.runtime.sendMessage(message).catch(() => {});
+          } catch {}
         }
       });
 
@@ -109,6 +113,10 @@ export default defineContentScript({
           parseResult.data.type === 'REQUEST_WATCHLIST_SYNC' ||
           parseResult.data.type === 'PING'
         ) {
+          // Reset signatures so fresh updates can be logged and delivered
+          lastSnapshotSignature = '';
+          lastIndicatorsSignature = '';
+          lastWatchlistSignature = '';
           window.postMessage(parseResult.data, '*');
         }
       });
