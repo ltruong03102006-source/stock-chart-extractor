@@ -7,6 +7,7 @@ import {
 } from '@/src/messaging/message.types';
 import { ExtensionMessageSchema } from '@/src/messaging/message.schemas';
 import { getAllStocks, normalizeSymbol } from '@/src/registry/stock-registry';
+import { ExportManager } from '@/src/export/export-manager';
 
 // Global cache state for Side Panel
 let currentRegistryState: StockRegistryState | null = null;
@@ -491,23 +492,57 @@ function initSidePanel() {
     };
   }
 
-  const btnExportAll = document.getElementById('btn-export-all') as HTMLElement | null;
+  const btnExportAll = document.getElementById('btn-export-all') as HTMLButtonElement | null;
   if (btnExportAll) {
     btnExportAll.onclick = async (e) => {
       e.preventDefault();
-      const allData = {
-        exportedAt: new Date().toISOString(),
-        stockRegistry: currentRegistryState,
-        latestDrawings: currentDrawingsSnapshot,
-        latestIndicators: currentIndicatorsSnapshot,
-        globalWatchlist: currentWatchlistSnapshot,
-      };
-      await navigator.clipboard.writeText(JSON.stringify(allData, null, 2));
-      const oldText = btnExportAll.textContent;
-      btnExportAll.textContent = '✓ Copied All!';
-      setTimeout(() => {
-        btnExportAll.textContent = oldText;
-      }, 1500);
+      if (ExportManager.getState() === 'exporting') return;
+
+      const originalText = btnExportAll.textContent || '📥 Export All JSON';
+      const originalBg = btnExportAll.style.backgroundColor;
+
+      // Visual State: Exporting
+      btnExportAll.disabled = true;
+      btnExportAll.style.cursor = 'wait';
+      btnExportAll.style.backgroundColor = '#d97706';
+      btnExportAll.textContent = '⏳ Đang đóng gói JSON...';
+
+      try {
+        const result = await ExportManager.executeExport();
+        if (result.success) {
+          // Visual State: Success
+          btnExportAll.style.backgroundColor = '#10b981';
+          const stockCount = result.stats?.totalStocks ?? 0;
+          btnExportAll.textContent = `✓ Đã xuất (${stockCount} mã)`;
+          setTimeout(() => {
+            btnExportAll.disabled = false;
+            btnExportAll.style.cursor = 'pointer';
+            btnExportAll.style.backgroundColor = originalBg;
+            btnExportAll.textContent = originalText;
+          }, 3000);
+        } else {
+          // Visual State: Error
+          btnExportAll.style.backgroundColor = '#ef4444';
+          btnExportAll.textContent = '❌ Lỗi xuất file';
+          console.error('[SidePanel] Export failed:', result.error);
+          setTimeout(() => {
+            btnExportAll.disabled = false;
+            btnExportAll.style.cursor = 'pointer';
+            btnExportAll.style.backgroundColor = originalBg;
+            btnExportAll.textContent = originalText;
+          }, 4000);
+        }
+      } catch (err) {
+        btnExportAll.style.backgroundColor = '#ef4444';
+        btnExportAll.textContent = '❌ Lỗi bất ngờ';
+        console.error('[SidePanel] Export unhandled error:', err);
+        setTimeout(() => {
+          btnExportAll.disabled = false;
+          btnExportAll.style.cursor = 'pointer';
+          btnExportAll.style.backgroundColor = originalBg;
+          btnExportAll.textContent = originalText;
+        }, 4000);
+      }
     };
   }
 
@@ -633,6 +668,7 @@ browser.storage.onChanged.addListener((changes, areaName) => {
   getIndicators: () => currentIndicatorsSnapshot,
   getWatchlist: () => currentWatchlistSnapshot,
   sync: () => sendSyncRequest(),
+  exportAll: () => ExportManager.executeExport(),
   status: () => {
     const badgeText = document.getElementById('sync-badge')?.textContent || 'INITIALIZING';
     return {

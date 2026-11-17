@@ -72,6 +72,49 @@ export class StorageRepository {
   }
 
   /**
+   * Retrieves all chart snapshots stored in chrome.storage.local
+   */
+  static async getAllChartSnapshots(): Promise<Record<string, IsolatedChartSnapshot>> {
+    const allData = await browser.storage.local.get(null);
+    const result: Record<string, IsolatedChartSnapshot> = {};
+    for (const [key, value] of Object.entries(allData)) {
+      if (key.startsWith(SNAPSHOT_KEY_PREFIX) && value && typeof value === 'object') {
+        const compositeKey = key.slice(SNAPSHOT_KEY_PREFIX.length);
+        result[compositeKey] = value as IsolatedChartSnapshot;
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Retrieves an atomic snapshot of all core data: registry, all chart snapshots, and global watchlist
+   */
+  static async getAllDataSnapshot(): Promise<{
+    stockRegistry: StockRegistryState;
+    chartSnapshots: Record<string, IsolatedChartSnapshot>;
+    globalWatchlist: any | null;
+  }> {
+    const allData = await browser.storage.local.get(null);
+    let stockRegistry = allData[REGISTRY_KEY] as StockRegistryState;
+    if (!stockRegistry || typeof stockRegistry !== 'object' || stockRegistry.version !== '2.0') {
+      stockRegistry = await this.getStockRegistry();
+    }
+    const chartSnapshots: Record<string, IsolatedChartSnapshot> = {};
+    for (const [key, value] of Object.entries(allData)) {
+      if (key.startsWith(SNAPSHOT_KEY_PREFIX) && value && typeof value === 'object') {
+        const compositeKey = key.slice(SNAPSHOT_KEY_PREFIX.length);
+        chartSnapshots[compositeKey] = value as IsolatedChartSnapshot;
+      }
+    }
+    const globalWatchlist = allData[WATCHLIST_KEY] || allData['latestWatchlist'] || null;
+    return {
+      stockRegistry,
+      chartSnapshots,
+      globalWatchlist,
+    };
+  }
+
+  /**
    * Automatically migrates legacy MVP 1.0 storage format into Multi-Stock 2.0 schema
    */
   static async migrateStorageV1toV2(): Promise<boolean> {
