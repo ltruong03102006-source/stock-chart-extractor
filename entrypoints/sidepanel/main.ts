@@ -285,39 +285,75 @@ function copyToClipboard(button: HTMLElement, getData: () => unknown) {
 // INITIALIZATION FUNCTION (RUNS WHEN DOM IS READY)
 // ----------------------------------------------------
 function initSidePanel() {
-  // 1. Tab Switching with Event Delegation (Bulletproof)
-  document.addEventListener('click', (event) => {
-    const target = (event.target as HTMLElement).closest('.tab-btn') as HTMLElement;
-    if (!target) return;
+  console.log('[Stock Chart Extractor][SidePanel] Initializing Side Panel UI...');
 
-    const targetTabId = target.getAttribute('data-tab');
-    if (!targetTabId) return;
+  // 1. Direct Click Handlers for Tabs (Guaranteed to work)
+  const tabBtns = document.querySelectorAll<HTMLButtonElement>('.tab-btn');
+  tabBtns.forEach((btn) => {
+    btn.onclick = (e) => {
+      e.preventDefault();
+      const targetTabId = btn.getAttribute('data-tab');
+      console.log(`[Stock Chart Extractor][SidePanel] Tab clicked: ${targetTabId}`);
+      if (!targetTabId) return;
 
-    document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
-    document.querySelectorAll('.tab-content').forEach((c) => c.classList.remove('active'));
+      document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach((c) => c.classList.remove('active'));
 
-    target.classList.add('active');
-    const targetEl = document.getElementById(targetTabId);
-    if (targetEl) targetEl.classList.add('active');
+      btn.classList.add('active');
+      const targetEl = document.getElementById(targetTabId);
+      if (targetEl) targetEl.classList.add('active');
+    };
   });
 
-  // 2. Button Click Handlers with Event Delegation
-  document.addEventListener('click', (event) => {
-    const target = event.target as HTMLElement;
-    if (!target) return;
+  // 2. Direct Click Handlers for Action Buttons
+  const btnSync = document.getElementById('btn-sync') as HTMLElement | null;
+  if (btnSync) {
+    btnSync.onclick = (e) => {
+      e.preventDefault();
+      console.log('[Stock Chart Extractor][SidePanel] Request Sync clicked!');
+      sendSyncRequest(btnSync);
+    };
+  }
 
-    if (target.id === 'btn-copy-drawings') {
-      copyToClipboard(target, () => currentDrawingsSnapshot);
-    } else if (target.id === 'btn-copy-indicators') {
-      copyToClipboard(target, () => currentIndicatorsSnapshot);
-    } else if (target.id === 'btn-copy-watchlist') {
-      copyToClipboard(target, () => currentWatchlistSnapshot);
-    } else if (target.id === 'btn-sync') {
-      sendSyncRequest(target);
+  const btnCopyDrawings = document.getElementById('btn-copy-drawings') as HTMLElement | null;
+  if (btnCopyDrawings) {
+    btnCopyDrawings.onclick = (e) => {
+      e.preventDefault();
+      copyToClipboard(btnCopyDrawings, () => currentDrawingsSnapshot);
+    };
+  }
+
+  const btnCopyIndicators = document.getElementById('btn-copy-indicators') as HTMLElement | null;
+  if (btnCopyIndicators) {
+    btnCopyIndicators.onclick = (e) => {
+      e.preventDefault();
+      copyToClipboard(btnCopyIndicators, () => currentIndicatorsSnapshot);
+    };
+  }
+
+  const btnCopyWatchlist = document.getElementById('btn-copy-watchlist') as HTMLElement | null;
+  if (btnCopyWatchlist) {
+    btnCopyWatchlist.onclick = (e) => {
+      e.preventDefault();
+      copyToClipboard(btnCopyWatchlist, () => currentWatchlistSnapshot);
+    };
+  }
+
+  // 3. Fallback: Event Delegation on Document
+  document.addEventListener('click', (event) => {
+    const target = (event.target as HTMLElement).closest('.tab-btn') as HTMLElement;
+    if (target) {
+      const targetTabId = target.getAttribute('data-tab');
+      if (targetTabId) {
+        document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach((c) => c.classList.remove('active'));
+        target.classList.add('active');
+        document.getElementById(targetTabId)?.classList.add('active');
+      }
     }
   });
 
-  // 3. Initial load from local storage cache
+  // 4. Initial load from local storage cache
   try {
     browser.storage.local
       .get(['latestSnapshot', 'latestIndicators', 'latestWatchlist'])
@@ -333,13 +369,13 @@ function initSidePanel() {
     console.warn('[Stock Chart Extractor] Storage access error:', err);
   }
 
-  // 4. Request fresh sync immediately and staggered
-  sendSyncRequest();
+  // 5. Request fresh sync immediately and staggered
+  sendSyncRequest(btnSync || undefined);
   setTimeout(() => sendSyncRequest(), 400);
   setTimeout(() => sendSyncRequest(), 1200);
   setTimeout(() => sendSyncRequest(), 2500);
 
-  // 5. Keep retrying sync if still initializing after 3 seconds
+  // 6. Keep retrying sync if still initializing after 3 seconds
   const autoRetryTimer = setInterval(() => {
     if (!currentDrawingsSnapshot && !currentIndicatorsSnapshot && !currentWatchlistSnapshot) {
       sendSyncRequest();
@@ -349,12 +385,14 @@ function initSidePanel() {
   }, 2000);
 }
 
-// Run immediately if DOM is ready, otherwise listen for DOMContentLoaded
+// Ensure initSidePanel runs reliably across all browser execution timings
+console.log('[Stock Chart Extractor][SidePanel] Loading main.ts script (readyState: ' + document.readyState + ')');
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', initSidePanel);
 } else {
   initSidePanel();
 }
+window.addEventListener('load', initSidePanel);
 
 // ----------------------------------------------------
 // REAL-TIME MESSAGE LISTENER (ALWAYS ACTIVE)
