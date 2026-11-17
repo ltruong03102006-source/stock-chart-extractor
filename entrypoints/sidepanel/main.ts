@@ -215,11 +215,21 @@ async function sendSyncRequest(button?: HTMLElement) {
     }).catch(() => {});
   } catch {}
 
-  // 2. Query ALL tabs matching FireAnt and send direct sync request
+  // 2. Read storage cache immediately in case background already updated it
   try {
-    const tabs = await browser.tabs.query({ url: ['*://fireant.vn/*', '*://*.fireant.vn/*'] });
-    if (tabs && tabs.length > 0) {
-      for (const tab of tabs) {
+    const res = await browser.storage.local.get(['latestSnapshot', 'latestIndicators', 'latestWatchlist']);
+    if (res.latestSnapshot) renderDrawings(res.latestSnapshot as ChartSnapshot);
+    if (res.latestIndicators) renderIndicators(res.latestIndicators as IndicatorsSnapshot);
+    if (res.latestWatchlist) renderWatchlist(res.latestWatchlist as WatchlistSnapshot);
+  } catch {}
+
+  // 3. Query ALL tabs and filter for FireAnt tabs (bulletproof against query match pattern quirks)
+  try {
+    const allTabs = await browser.tabs.query({});
+    const fireantTabs = allTabs.filter((t) => t.url && t.url.includes('fireant'));
+    if (fireantTabs.length > 0) {
+      if (button) button.textContent = `Syncing (${fireantTabs.length} tab)...`;
+      for (const tab of fireantTabs) {
         if (tab.id) {
           browser.tabs.sendMessage(tab.id, {
             source: EXTENSION_SOURCE,
@@ -228,12 +238,15 @@ async function sendSyncRequest(button?: HTMLElement) {
           }).catch(() => {});
         }
       }
+    } else {
+      if (button) button.textContent = 'No FireAnt Tab!';
+      console.warn('[Stock Chart Extractor] No FireAnt tabs found among open tabs.');
     }
   } catch (err) {
-    console.warn('[Stock Chart Extractor] Failed to query FireAnt tabs for sync:', err);
+    console.warn('[Stock Chart Extractor] Failed to query tabs for sync:', err);
   }
 
-  // 3. Fallback: Also try active tab in current window
+  // 4. Fallback: Also try active tab in current window
   try {
     const activeTabs = await browser.tabs.query({ active: true, currentWindow: true });
     if (activeTabs[0]?.id) {
@@ -356,6 +369,22 @@ browser.runtime.onMessage.addListener((message: unknown) => {
     renderIndicators(parsed.data.payload as IndicatorsSnapshot);
   } else if (parsed.data.type === 'WATCHLIST_SNAPSHOT') {
     renderWatchlist(parsed.data.payload as WatchlistSnapshot);
+  }
+});
+
+// ----------------------------------------------------
+// STORAGE LISTENER (SYNCS AUTOMATICALLY ACROSS ALL CONTEXTS)
+// ----------------------------------------------------
+browser.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'local') return;
+  if (changes.latestSnapshot?.newValue) {
+    renderDrawings(changes.latestSnapshot.newValue as ChartSnapshot);
+  }
+  if (changes.latestIndicators?.newValue) {
+    renderIndicators(changes.latestIndicators.newValue as IndicatorsSnapshot);
+  }
+  if (changes.latestWatchlist?.newValue) {
+    renderWatchlist(changes.latestWatchlist.newValue as WatchlistSnapshot);
   }
 });
 

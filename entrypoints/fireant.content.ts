@@ -12,14 +12,8 @@ export default defineContentScript({
 
   main() {
     try {
-      const GUARD_KEY = '__STOCK_CHART_EXTRACTOR_CONTENT_SCRIPT_INITIALIZED__';
-      if ((window as unknown as Record<string, boolean>)[GUARD_KEY]) {
-        return;
-      }
-      (window as unknown as Record<string, boolean>)[GUARD_KEY] = true;
-
       const isTopFrame = window === window.top;
-      console.log(`[Stock Chart Extractor] Content Script is running! (frame: ${isTopFrame ? 'TOP' : 'IFRAME'})`);
+      console.log(`[Stock Chart Extractor] Content Script is running! (frame: ${isTopFrame ? 'TOP' : 'IFRAME'}, URL: ${window.location.href})`);
       console.log('[Stock Chart Extractor] Current URL:', window.location.href);
 
       let lastSnapshotSignature = '';

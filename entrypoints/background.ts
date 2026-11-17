@@ -4,37 +4,41 @@ export default defineBackground(() => {
   console.log('[Stock Chart Extractor] Background service worker initialized.');
 
   // Helper to dynamically inject scripts into already-open FireAnt tabs if detached
-  async function ensureInjected(tabId: number) {
+  async function ensureInjected(tabId: number): Promise<boolean> {
     try {
       await browser.tabs.sendMessage(tabId, {
         source: 'STOCK_CHART_EXTRACTOR',
         type: 'PING',
         timestamp: Date.now(),
       });
+      return true;
     } catch {
       const chromeObj = (globalThis as any).chrome;
       if (chromeObj?.scripting?.executeScript) {
         try {
+          // Target main frame only to avoid cross-origin third-party iframe errors
           await chromeObj.scripting.executeScript({
-            target: { tabId, allFrames: true },
+            target: { tabId },
             files: ['content-scripts/fireant-bridge.js'],
             world: 'MAIN',
           });
           await chromeObj.scripting.executeScript({
-            target: { tabId, allFrames: true },
+            target: { tabId },
             files: ['content-scripts/fireant.js'],
           });
           console.log(`[Stock Chart Extractor] Dynamically injected scripts into tab ${tabId}`);
+          return true;
         } catch (err) {
           console.warn(`[Stock Chart Extractor] Failed to inject scripts into tab ${tabId}:`, err);
         }
       }
+      return false;
     }
   }
 
   // Scan and auto-inject into existing FireAnt tabs on background startup
-  browser.tabs.query({ url: ['*://fireant.vn/*', '*://*.fireant.vn/*'] }).then((tabs) => {
-    tabs.forEach((tab) => {
+  browser.tabs.query({}).then((tabs) => {
+    tabs.filter((t) => t.url && t.url.includes('fireant')).forEach((tab) => {
       if (tab.id) ensureInjected(tab.id);
     });
   }).catch(() => {});
@@ -76,15 +80,18 @@ export default defineBackground(() => {
       });
 
       // 2. Query all FireAnt tabs and forward REQUEST_SYNC to refresh live data
-      browser.tabs.query({ url: ['*://fireant.vn/*', '*://*.fireant.vn/*'] }).then((tabs) => {
-        tabs.forEach((tab) => {
+      browser.tabs.query({}).then((tabs) => {
+        const fireantTabs = tabs.filter((t) => t.url && t.url.includes('fireant'));
+        fireantTabs.forEach((tab) => {
           if (tab.id) {
             ensureInjected(tab.id).then(() => {
-              browser.tabs.sendMessage(tab.id!, {
-                source: 'STOCK_CHART_EXTRACTOR',
-                type: 'REQUEST_SYNC',
-                timestamp: Date.now(),
-              }).catch(() => {});
+              setTimeout(() => {
+                browser.tabs.sendMessage(tab.id!, {
+                  source: 'STOCK_CHART_EXTRACTOR',
+                  type: 'REQUEST_SYNC',
+                  timestamp: Date.now(),
+                }).catch(() => {});
+              }, 100);
             });
           }
         });
