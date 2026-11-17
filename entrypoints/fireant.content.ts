@@ -23,6 +23,8 @@ export default defineContentScript({
       console.log('[Stock Chart Extractor] Current URL:', window.location.href);
 
       let lastSnapshotSignature = '';
+      let lastIndicatorsSignature = '';
+      let lastWatchlistSignature = '';
 
       // 1. Listen for messages from Main World Bridge -> forward to Extension Runtime (Side Panel / Background)
       window.addEventListener('message', (event) => {
@@ -67,6 +69,31 @@ export default defineContentScript({
             }
           }
         }
+
+        if (message.type === 'INDICATORS_SNAPSHOT') {
+          const snapshot = message.payload as any;
+          const items = snapshot?.items || [];
+          const currentSignature = items.map((i: any) => `${i.id}:${JSON.stringify(i.inputs)}:${JSON.stringify(i.style)}`).join('|');
+          if (currentSignature !== lastIndicatorsSignature) {
+            lastIndicatorsSignature = currentSignature;
+            console.log(`[Stock Chart Extractor][Isolated World] 📊 Indicators Updated: ${items.length} item(s)`);
+            try {
+              browser.runtime.sendMessage(message).catch(() => {});
+            } catch {}
+          }
+        }
+
+        if (message.type === 'WATCHLIST_SNAPSHOT') {
+          const snapshot = message.payload as any;
+          const currentSignature = JSON.stringify(snapshot?.watchlists || []);
+          if (currentSignature !== lastWatchlistSignature) {
+            lastWatchlistSignature = currentSignature;
+            console.log(`[Stock Chart Extractor][Isolated World] 📋 Watchlist Updated: ${snapshot?.activeItems?.length || 0} symbol(s)`);
+            try {
+              browser.runtime.sendMessage(message).catch(() => {});
+            } catch {}
+          }
+        }
       });
 
       // 2. Listen for messages from Extension Runtime (Side Panel) -> forward to Main World Bridge
@@ -76,7 +103,12 @@ export default defineContentScript({
           return;
         }
 
-        if (parseResult.data.type === 'REQUEST_SYNC' || parseResult.data.type === 'PING') {
+        if (
+          parseResult.data.type === 'REQUEST_SYNC' ||
+          parseResult.data.type === 'REQUEST_INDICATORS_SYNC' ||
+          parseResult.data.type === 'REQUEST_WATCHLIST_SYNC' ||
+          parseResult.data.type === 'PING'
+        ) {
           window.postMessage(parseResult.data, '*');
         }
       });

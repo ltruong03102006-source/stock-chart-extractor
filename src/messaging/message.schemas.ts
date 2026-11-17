@@ -46,6 +46,65 @@ export const ChartSnapshotSchema = z.object({
   }),
 });
 
+export const IndicatorItemSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  type: z.string(),
+  shortName: z.string(),
+  inputs: z.record(z.string(), z.unknown()).default({}),
+  style: z.record(z.string(), z.unknown()).default({}),
+  pane: z.object({
+    type: z.enum(['main', 'separate']),
+  }),
+  values: z.object({
+    latest: z.union([z.number(), z.record(z.string(), z.number())]).nullable().default(null),
+  }).default({ latest: null }),
+  metadata: z.object({
+    source: z.literal('fireant').default('fireant'),
+    extractionStatus: z.enum(['VERIFIED', 'PARTIALLY VERIFIED', 'NOT AVAILABLE']).default('VERIFIED'),
+  }),
+});
+
+export const IndicatorsSnapshotSchema = z.object({
+  totalIndicators: z.number().default(0),
+  items: z.array(IndicatorItemSchema),
+  timestamp: z.number().default(() => Date.now()),
+});
+
+export const WatchlistItemSchema = z.object({
+  id: z.string(),
+  symbol: z.string(),
+  name: z.string().optional(),
+  exchange: z.string().optional(),
+  price: z.number().nullable().optional(),
+  referencePrice: z.number().nullable().optional(),
+  change: z.number().nullable().optional(),
+  changePercent: z.number().nullable().optional(),
+  volume: z.number().nullable().optional(),
+  position: z.number().default(0),
+  metadata: z.object({
+    source: z.literal('fireant').default('fireant'),
+    extractionStatus: z.enum(['VERIFIED', 'PARTIALLY VERIFIED']).default('VERIFIED'),
+  }),
+});
+
+export const WatchlistGroupSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  isDefault: z.boolean().default(false),
+  displayIndex: z.number().default(0),
+  totalSymbols: z.number().default(0),
+  items: z.array(WatchlistItemSchema),
+});
+
+export const WatchlistSnapshotSchema = z.object({
+  activeWatchlistId: z.string().default(''),
+  totalWatchlists: z.number().default(0),
+  watchlists: z.array(WatchlistGroupSchema),
+  activeItems: z.array(WatchlistItemSchema),
+  timestamp: z.number().default(() => Date.now()),
+});
+
 export const ExtensionMessageSchema = z.object({
   source: z.literal('STOCK_CHART_EXTRACTOR'),
   type: z.enum([
@@ -55,7 +114,11 @@ export const ExtensionMessageSchema = z.object({
     'DRAWING_CREATED',
     'DRAWING_UPDATED',
     'DRAWING_DELETED',
+    'INDICATORS_SNAPSHOT',
+    'WATCHLIST_SNAPSHOT',
     'REQUEST_SYNC',
+    'REQUEST_INDICATORS_SYNC',
+    'REQUEST_WATCHLIST_SYNC',
     'PING',
     'PONG',
   ]),

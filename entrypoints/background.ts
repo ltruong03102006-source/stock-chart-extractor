@@ -21,6 +21,10 @@ export default defineBackground(() => {
     if (parsed.data.type === 'DRAWINGS_SNAPSHOT') {
       // Cache latest snapshot in storage so Side Panel loads immediately on open
       browser.storage.local.set({ latestSnapshot: parsed.data.payload }).catch(() => {});
+    } else if (parsed.data.type === 'INDICATORS_SNAPSHOT') {
+      browser.storage.local.set({ latestIndicators: parsed.data.payload }).catch(() => {});
+    } else if (parsed.data.type === 'WATCHLIST_SNAPSHOT') {
+      browser.storage.local.set({ latestWatchlist: parsed.data.payload }).catch(() => {});
     }
   });
 });

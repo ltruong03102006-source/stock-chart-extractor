@@ -1,6 +1,8 @@
 import { EXTENSION_SOURCE, type ChartSnapshot, type DrawingObject } from '@/src/messaging/message.types';
 import { extractDrawing } from '@/src/extractors/extractor.factory';
 import { extractSafePoints } from '@/src/extractors/base.extractor';
+import { extractAllIndicators } from '@/src/extractors/indicators/indicator.extractor';
+import { extractWatchlists } from '@/src/extractors/watchlist/watchlist.extractor';
 
 export default defineContentScript({
   matches: [
@@ -130,6 +132,45 @@ export default defineContentScript({
     }
 
     /**
+     * Broadcast indicators snapshot
+     */
+    function broadcastIndicators() {
+      const found = locateChartWidget();
+      const widget = found?.widget || activeChartWidget;
+      const model = widget?.model()?.m_model;
+      if (!model) return;
+
+      const indicatorsSnapshot = extractAllIndicators(model);
+      window.postMessage(
+        {
+          source: EXTENSION_SOURCE,
+          type: 'INDICATORS_SNAPSHOT',
+          payload: indicatorsSnapshot,
+          timestamp: Date.now(),
+        },
+        '*'
+      );
+    }
+
+    /**
+     * Broadcast watchlist snapshot
+     */
+    function broadcastWatchlist() {
+      if (!isTopFrame) return;
+
+      const watchlistSnapshot = extractWatchlists();
+      window.postMessage(
+        {
+          source: EXTENSION_SOURCE,
+          type: 'WATCHLIST_SNAPSHOT',
+          payload: watchlistSnapshot,
+          timestamp: Date.now(),
+        },
+        '*'
+      );
+    }
+
+    /**
      * Log detailed inventory of all currently exposed line tools
      */
     function logToolsInventory(tools: any[]) {
@@ -219,8 +260,195 @@ export default defineContentScript({
             );
           });
       },
+      surveyIndicators: () => {
+        const w = activeChartWidget || locateChartWidget()?.widget;
+        if (!w) {
+          console.warn('[Stock Chart Extractor] No chart widget found!');
+          return { error: 'No chart widget found' };
+        }
+        const model = w.model()?.m_model;
+        if (!model) {
+          console.warn('[Stock Chart Extractor] No chart model found!');
+          return { error: 'No chart model found' };
+        }
+
+        const protoMethods = Object.getOwnPropertyNames(Object.getPrototypeOf(model));
+        const surveyResult: Record<string, any> = {
+          hasAllStudies: typeof model.allStudies === 'function',
+          hasPanes: typeof model.panes === 'function',
+          panesCount: typeof model.panes === 'function' ? model.panes().length : 0,
+          studiesFound: [],
+          rawStudiesCount: 0,
+          modelStudyMethods: protoMethods.filter((m) => /study|pane|source/i.test(m)),
+        };
+
+        let rawStudies: any[] = [];
+        if (typeof model.allStudies === 'function') {
+          rawStudies = model.allStudies() || [];
+        } else if (typeof model.panes === 'function') {
+          const panes = model.panes() || [];
+          panes.forEach((pane: any) => {
+            const sources = typeof pane.sources === 'function' ? pane.sources() : (pane._sources || []);
+            sources.forEach((src: any) => {
+              if (src && (src.metaInfo || src._metaInfo || src.isPriceStudy)) {
+                rawStudies.push(src);
+              }
+            });
+          });
+        }
+
+        surveyResult.rawStudiesCount = rawStudies.length;
+
+        surveyResult.studiesFound = rawStudies.map((s: any, idx: number) => {
+          const id = typeof s.id === 'function' ? s.id() : s._id;
+          const metaInfo = typeof s.metaInfo === 'function' ? s.metaInfo() : s._metaInfo;
+          const name = typeof s.title === 'function' ? s.title() : (metaInfo?.description || metaInfo?.name || (typeof s.name === 'function' ? s.name() : 'Unknown'));
+          const isPriceStudy = typeof s.isPriceStudy === 'function' ? s.isPriceStudy() : metaInfo?.is_price_study;
+          const sProto = Object.getOwnPropertyNames(Object.getPrototypeOf(s) || {});
+
+          // Try extract inputs
+          let inputs: any = null;
+          try {
+            const props = typeof s.properties === 'function' ? s.properties() : s._properties;
+            if (props && props.inputs) {
+              inputs = typeof props.inputs.state === 'function' ? props.inputs.state() : props.inputs;
+            }
+          } catch (e) {
+            inputs = { error: String(e) };
+          }
+
+          // Try extract styles
+          let styles: any = null;
+          try {
+            const props = typeof s.properties === 'function' ? s.properties() : s._properties;
+            if (props && props.styles) {
+              styles = typeof props.styles.state === 'function' ? props.styles.state() : props.styles;
+            }
+          } catch (e) {
+            styles = { error: String(e) };
+          }
+
+          // Check if latest values or data series are accessible
+          const dataMethods = sProto.filter((m) => /data|value|last|plot/i.test(m));
+          let latestValuesSample: any = null;
+          try {
+            if (typeof s.data === 'function') {
+              const d = s.data();
+              latestValuesSample = d ? { hasData: true, length: d.size?.() ?? d.length } : null;
+            }
+          } catch {}
+
+          return {
+            '#': idx + 1,
+            id,
+            name,
+            shortName: metaInfo?.shortDescription || metaInfo?.shortId || name,
+            isPriceStudy: Boolean(isPriceStudy),
+            paneType: isPriceStudy ? 'main' : 'separate',
+            inputs,
+            styles: styles ? Object.keys(styles) : [],
+            protoMethods: sProto.slice(0, 20),
+            dataMethods,
+            latestValuesSample,
+          };
+        });
+
+        console.log(`[Stock Chart Extractor] === SURVEY INDICATORS RESULT (${surveyResult.rawStudiesCount} studies) ===`);
+        console.table(surveyResult.studiesFound.map((s: any) => ({
+          '#': s['#'],
+          id: s.id,
+          name: s.name,
+          paneType: s.paneType,
+          inputs: JSON.stringify(s.inputs || {}),
+        })));
+        return surveyResult;
+      },
+      surveyWatchlist: () => {
+        const result: Record<string, any> = {
+          localStorageKeys: [],
+          sessionStorageKeys: [],
+          matchingStorageData: {},
+          windowStateCandidates: [],
+          domWatchlistElements: 0,
+        };
+
+        // 1. Scan localStorage safely
+        try {
+          for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (!key) continue;
+            // Ignore sensitive keys
+            if (/token|auth|jwt|password|secret|credential|session/i.test(key)) continue;
+
+            result.localStorageKeys.push(key);
+            if (/watch|list|symbol|favorite|danh.?muc|quote|stock|market|portfolio|banggia|fav/i.test(key)) {
+              try {
+                const val = localStorage.getItem(key);
+                result.matchingStorageData[key] = val ? JSON.parse(val) : null;
+              } catch {
+                result.matchingStorageData[key] = localStorage.getItem(key);
+              }
+            }
+          }
+        } catch (e) {
+          result.storageError = String(e);
+        }
+
+        // 2. Scan sessionStorage safely
+        try {
+          for (let i = 0; i < sessionStorage.length; i++) {
+            const key = sessionStorage.key(i);
+            if (!key) continue;
+            if (/token|auth|jwt|password|secret|credential|session/i.test(key)) continue;
+            result.sessionStorageKeys.push(key);
+            if (/watch|list|symbol|favorite|danh.?muc|quote|stock/i.test(key)) {
+              try {
+                const val = sessionStorage.getItem(key);
+                result.matchingStorageData[`session:${key}`] = val ? JSON.parse(val) : null;
+              } catch {
+                result.matchingStorageData[`session:${key}`] = sessionStorage.getItem(key);
+              }
+            }
+          }
+        } catch {}
+
+        // 3. Scan window for stores/state
+        const win = window as any;
+        const candidateProps = [
+          '__PRELOADED_STATE__', '__REDUX_STATE__', '__INITIAL_STATE__',
+          'store', 'appStore', 'watchlistStore', 'fireant', 'FireAnt',
+          'signalR', 'connection', 'quoteService', 'symbols',
+        ];
+        candidateProps.forEach((prop) => {
+          if (win[prop]) {
+            result.windowStateCandidates.push({
+              prop,
+              type: typeof win[prop],
+              keys: typeof win[prop] === 'object' && win[prop] ? Object.keys(win[prop]).slice(0, 10) : [],
+            });
+          }
+        });
+
+        // 4. Check DOM for watchlist components
+        try {
+          const elCount = document.querySelectorAll('[class*="watchlist"], [class*="watch-list"], [id*="watchlist"], [class*="favorite"]').length;
+          result.domWatchlistElements = elCount;
+        } catch {}
+
+        console.log('[Stock Chart Extractor] === SURVEY WATCHLIST RESULT ===');
+        console.log('Matching Storage Data:', result.matchingStorageData);
+        console.log('Window State Candidates:', result.windowStateCandidates);
+        return result;
+      },
+      getIndicators: () => {
+        const w = activeChartWidget || locateChartWidget()?.widget;
+        return extractAllIndicators(w?.model()?.m_model);
+      },
+      getWatchlists: () => extractWatchlists(),
       syncNow: () => {
         broadcastSnapshot();
+        broadcastIndicators();
+        broadcastWatchlist();
       },
     };
 
@@ -253,11 +481,17 @@ export default defineContentScript({
           console.log(`[Stock Chart Extractor][Main World] ✅ SUCCESS: Connected to chart widget at [${found.location}]!`);
           logToolsInventory(tools);
 
-          // Broadcast initial snapshot
+          // Broadcast initial snapshots
           broadcastSnapshot();
+          broadcastIndicators();
+          broadcastWatchlist();
 
           // Continuously sync every 1 second
-          setInterval(broadcastSnapshot, 1000);
+          setInterval(() => {
+            broadcastSnapshot();
+            broadcastIndicators();
+            broadcastWatchlist();
+          }, 1000);
           return;
         }
       }
@@ -284,6 +518,12 @@ export default defineContentScript({
 
       if (event.data.type === 'REQUEST_SYNC' || event.data.type === 'PING') {
         broadcastSnapshot();
+        broadcastIndicators();
+        broadcastWatchlist();
+      } else if (event.data.type === 'REQUEST_INDICATORS_SYNC') {
+        broadcastIndicators();
+      } else if (event.data.type === 'REQUEST_WATCHLIST_SYNC') {
+        broadcastWatchlist();
       }
     });
   },

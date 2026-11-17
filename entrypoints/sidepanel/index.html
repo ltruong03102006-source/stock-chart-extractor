@@ -14,6 +14,7 @@
         --accent-blue: #38bdf8;
         --accent-green: #4ade80;
         --accent-amber: #fbbf24;
+        --accent-purple: #c084fc;
         --border-color: #334155;
       }
       * {
@@ -50,6 +51,50 @@
         background-color: rgba(251, 191, 36, 0.2);
         color: var(--accent-amber);
       }
+      .badge-pane-main {
+        background-color: rgba(56, 189, 248, 0.2);
+        color: var(--accent-blue);
+      }
+      .badge-pane-sep {
+        background-color: rgba(192, 132, 252, 0.2);
+        color: var(--accent-purple);
+      }
+      .tabs-nav {
+        display: flex;
+        gap: 6px;
+        margin-bottom: 12px;
+        background-color: var(--bg-secondary);
+        padding: 4px;
+        border-radius: 8px;
+        border: 1px solid var(--border-color);
+      }
+      .tab-btn {
+        flex: 1;
+        background: transparent;
+        color: var(--text-secondary);
+        border: none;
+        padding: 7px 4px;
+        border-radius: 6px;
+        font-size: 11px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s;
+        text-align: center;
+      }
+      .tab-btn:hover {
+        background-color: var(--bg-tertiary);
+        color: var(--text-primary);
+      }
+      .tab-btn.active {
+        background-color: #2563eb;
+        color: #ffffff;
+      }
+      .tab-content {
+        display: none;
+      }
+      .tab-content.active {
+        display: block;
+      }
       .card {
         background-color: var(--bg-secondary);
         border: 1px solid var(--border-color);
@@ -84,19 +129,19 @@
         font-weight: 700;
         color: var(--accent-blue);
       }
-      .drawing-list {
-        max-height: 180px;
+      .scrollable-list {
+        max-height: 200px;
         overflow-y: auto;
       }
-      .drawing-item {
+      .list-item {
         display: flex;
         justify-content: space-between;
         align-items: center;
-        padding: 6px 8px;
+        padding: 8px;
         border-bottom: 1px solid var(--border-color);
         font-size: 12px;
       }
-      .drawing-item:last-child {
+      .list-item:last-child {
         border-bottom: none;
       }
       pre {
@@ -106,7 +151,7 @@
         border-radius: 6px;
         font-family: 'Fira Code', monospace;
         font-size: 11px;
-        max-height: 260px;
+        max-height: 240px;
         overflow: auto;
       }
       .actions {
@@ -114,7 +159,7 @@
         gap: 8px;
         margin-top: 8px;
       }
-      button {
+      button.btn-action {
         background-color: #2563eb;
         color: white;
         border: none;
@@ -124,8 +169,16 @@
         font-weight: 600;
         cursor: pointer;
       }
-      button:hover {
+      button.btn-action:hover {
         background-color: #1d4ed8;
+      }
+      .tag-symbol {
+        background-color: var(--bg-tertiary);
+        color: var(--accent-blue);
+        font-weight: 700;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-family: monospace;
       }
     </style>
   </head>
@@ -140,35 +193,119 @@
       </div>
     </header>
 
-    <div class="card">
-      <div class="card-title">Chart Information</div>
-      <div class="stat-grid">
-        <div class="stat-item">
-          <div class="stat-label">Symbol</div>
-          <div id="stat-symbol" class="stat-value">---</div>
+    <!-- Navigation Tabs -->
+    <nav class="tabs-nav">
+      <button class="tab-btn active" data-tab="tab-drawings">
+        Drawings (<span id="tab-count-drawings">0</span>)
+      </button>
+      <button class="tab-btn" data-tab="tab-indicators">
+        Indicators (<span id="tab-count-indicators">0</span>)
+      </button>
+      <button class="tab-btn" data-tab="tab-watchlist">
+        Watchlist (<span id="tab-count-watchlist">0</span>)
+      </button>
+    </nav>
+
+    <!-- TAB 1: DRAWINGS -->
+    <div id="tab-drawings" class="tab-content active">
+      <div class="card">
+        <div class="card-title">Chart Information</div>
+        <div class="stat-grid">
+          <div class="stat-item">
+            <div class="stat-label">Symbol</div>
+            <div id="stat-symbol" class="stat-value">---</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Total Drawings</div>
+            <div id="stat-count" class="stat-value">0</div>
+          </div>
         </div>
-        <div class="stat-item">
-          <div class="stat-label">Total Drawings</div>
-          <div id="stat-count" class="stat-value">0</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Detected Drawings</div>
+        <div id="drawing-list" class="scrollable-list">
+          <div style="color: var(--text-secondary); text-align: center; padding: 12px;">
+            Waiting for FireAnt Chart drawings...
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Live Normalized JSON (Drawings)</div>
+        <pre id="json-viewer-drawings">// Drawings JSON syncs here in real-time</pre>
+        <div class="actions">
+          <button id="btn-copy-drawings" class="btn-action">Copy Drawings JSON</button>
+          <button id="btn-sync" class="btn-action" style="background-color: var(--bg-tertiary);">Request Sync</button>
         </div>
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-title">Detected Drawings</div>
-      <div id="drawing-list" class="drawing-list">
-        <div style="color: var(--text-secondary); text-align: center; padding: 12px;">
-          Waiting for FireAnt Chart data...
+    <!-- TAB 2: INDICATORS -->
+    <div id="tab-indicators" class="tab-content">
+      <div class="card">
+        <div class="card-title">Indicators Information</div>
+        <div class="stat-grid">
+          <div class="stat-item">
+            <div class="stat-label">Total Studies</div>
+            <div id="stat-indicators-count" class="stat-value">0</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Main / Separate</div>
+            <div id="stat-indicators-panes" class="stat-value">0 / 0</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Active Indicators / Studies</div>
+        <div id="indicators-list" class="scrollable-list">
+          <div style="color: var(--text-secondary); text-align: center; padding: 12px;">
+            Waiting for FireAnt Indicators data...
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Live Normalized JSON (Indicators)</div>
+        <pre id="json-viewer-indicators">// Indicators JSON syncs here in real-time</pre>
+        <div class="actions">
+          <button id="btn-copy-indicators" class="btn-action">Copy Indicators JSON</button>
         </div>
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-title">Live Normalized JSON</div>
-      <pre id="json-viewer">// JSON will automatically sync here in real-time</pre>
-      <div class="actions">
-        <button id="btn-copy">Copy JSON</button>
-        <button id="btn-sync" style="background-color: var(--bg-tertiary);">Request Sync</button>
+    <!-- TAB 3: WATCHLIST -->
+    <div id="tab-watchlist" class="tab-content">
+      <div class="card">
+        <div class="card-title">Watchlist Information</div>
+        <div class="stat-grid">
+          <div class="stat-item">
+            <div class="stat-label">Active Watchlist</div>
+            <div id="stat-watchlist-name" class="stat-value" style="font-size: 14px;">---</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Total Symbols</div>
+            <div id="stat-watchlist-count" class="stat-value">0</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Watchlist Symbols</div>
+        <div id="watchlist-items-list" class="scrollable-list">
+          <div style="color: var(--text-secondary); text-align: center; padding: 12px;">
+            Waiting for FireAnt Watchlist data...
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Live Normalized JSON (Watchlist)</div>
+        <pre id="json-viewer-watchlist">// Watchlist JSON syncs here in real-time</pre>
+        <div class="actions">
+          <button id="btn-copy-watchlist" class="btn-action">Copy Watchlist JSON</button>
+        </div>
       </div>
     </div>
 
