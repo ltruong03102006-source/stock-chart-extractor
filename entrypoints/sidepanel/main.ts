@@ -192,21 +192,58 @@ function renderWatchlist(snapshot: WatchlistSnapshot) {
 }
 
 // ----------------------------------------------------
+// ----------------------------------------------------
 // SYNC REQUEST TRIGGER
 // ----------------------------------------------------
-async function sendSyncRequest() {
+async function sendSyncRequest(button?: HTMLElement) {
+  if (button) {
+    const origText = button.textContent;
+    button.textContent = 'Syncing...';
+    button.setAttribute('disabled', 'true');
+    setTimeout(() => {
+      button.textContent = origText;
+      button.removeAttribute('disabled');
+    }, 1000);
+  }
+
+  // 1. Tell background service worker to reply with cache and forward to tabs
   try {
-    const tabs = await browser.tabs.query({ active: true, currentWindow: true });
-    if (tabs[0]?.id) {
-      await browser.tabs.sendMessage(tabs[0].id, {
+    browser.runtime.sendMessage({
+      source: EXTENSION_SOURCE,
+      type: 'REQUEST_SYNC',
+      timestamp: Date.now(),
+    }).catch(() => {});
+  } catch {}
+
+  // 2. Query ALL tabs matching FireAnt and send direct sync request
+  try {
+    const tabs = await browser.tabs.query({ url: ['https://fireant.vn/*', 'https://*.fireant.vn/*'] });
+    if (tabs && tabs.length > 0) {
+      for (const tab of tabs) {
+        if (tab.id) {
+          browser.tabs.sendMessage(tab.id, {
+            source: EXTENSION_SOURCE,
+            type: 'REQUEST_SYNC',
+            timestamp: Date.now(),
+          }).catch(() => {});
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[Stock Chart Extractor] Failed to query FireAnt tabs for sync:', err);
+  }
+
+  // 3. Fallback: Also try active tab in current window
+  try {
+    const activeTabs = await browser.tabs.query({ active: true, currentWindow: true });
+    if (activeTabs[0]?.id) {
+      browser.tabs.sendMessage(activeTabs[0].id, {
         source: EXTENSION_SOURCE,
         type: 'REQUEST_SYNC',
         timestamp: Date.now(),
-      });
+      }).catch(() => {});
     }
-  } catch (err) {
-    console.warn('[Stock Chart Extractor] Failed to send sync request to active tab:', err);
-  }
+  } catch {}
 }
 
 // ----------------------------------------------------
@@ -214,7 +251,14 @@ async function sendSyncRequest() {
 // ----------------------------------------------------
 function copyToClipboard(button: HTMLElement, getData: () => unknown) {
   const data = getData();
-  if (!data) return;
+  if (!data) {
+    const orig = button.textContent;
+    button.textContent = 'No Data Yet';
+    setTimeout(() => {
+      button.textContent = orig;
+    }, 1200);
+    return;
+  }
   navigator.clipboard.writeText(JSON.stringify(data, null, 2)).then(() => {
     const originalText = button.textContent;
     button.textContent = 'Copied!';
@@ -256,7 +300,7 @@ function initSidePanel() {
     } else if (target.id === 'btn-copy-watchlist') {
       copyToClipboard(target, () => currentWatchlistSnapshot);
     } else if (target.id === 'btn-sync') {
-      sendSyncRequest();
+      sendSyncRequest(target);
     }
   });
 
@@ -276,10 +320,20 @@ function initSidePanel() {
     console.warn('[Stock Chart Extractor] Storage access error:', err);
   }
 
-  // 4. Request fresh sync immediately and after a short tick
+  // 4. Request fresh sync immediately and staggered
   sendSyncRequest();
-  setTimeout(sendSyncRequest, 500);
-  setTimeout(sendSyncRequest, 1500);
+  setTimeout(() => sendSyncRequest(), 400);
+  setTimeout(() => sendSyncRequest(), 1200);
+  setTimeout(() => sendSyncRequest(), 2500);
+
+  // 5. Keep retrying sync if still initializing after 3 seconds
+  const autoRetryTimer = setInterval(() => {
+    if (!currentDrawingsSnapshot && !currentIndicatorsSnapshot && !currentWatchlistSnapshot) {
+      sendSyncRequest();
+    } else {
+      clearInterval(autoRetryTimer);
+    }
+  }, 2000);
 }
 
 // Run immediately if DOM is ready, otherwise listen for DOMContentLoaded

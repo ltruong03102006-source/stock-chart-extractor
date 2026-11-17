@@ -25,6 +25,32 @@ export default defineBackground(() => {
       browser.storage.local.set({ latestIndicators: parsed.data.payload }).catch(() => {});
     } else if (parsed.data.type === 'WATCHLIST_SNAPSHOT') {
       browser.storage.local.set({ latestWatchlist: parsed.data.payload }).catch(() => {});
+    } else if (parsed.data.type === 'REQUEST_SYNC') {
+      // 1. Reply immediately with cached snapshots to open views (e.g. Side Panel)
+      browser.storage.local.get(['latestSnapshot', 'latestIndicators', 'latestWatchlist']).then((res: Record<string, unknown>) => {
+        if (res.latestSnapshot) {
+          browser.runtime.sendMessage({ source: 'STOCK_CHART_EXTRACTOR', type: 'DRAWINGS_SNAPSHOT', payload: res.latestSnapshot }).catch(() => {});
+        }
+        if (res.latestIndicators) {
+          browser.runtime.sendMessage({ source: 'STOCK_CHART_EXTRACTOR', type: 'INDICATORS_SNAPSHOT', payload: res.latestIndicators }).catch(() => {});
+        }
+        if (res.latestWatchlist) {
+          browser.runtime.sendMessage({ source: 'STOCK_CHART_EXTRACTOR', type: 'WATCHLIST_SNAPSHOT', payload: res.latestWatchlist }).catch(() => {});
+        }
+      });
+
+      // 2. Query all FireAnt tabs and forward REQUEST_SYNC to refresh live data
+      browser.tabs.query({ url: ['https://fireant.vn/*', 'https://*.fireant.vn/*'] }).then((tabs) => {
+        tabs.forEach((tab) => {
+          if (tab.id) {
+            browser.tabs.sendMessage(tab.id, {
+              source: 'STOCK_CHART_EXTRACTOR',
+              type: 'REQUEST_SYNC',
+              timestamp: Date.now(),
+            }).catch(() => {});
+          }
+        });
+      });
     }
   });
 });

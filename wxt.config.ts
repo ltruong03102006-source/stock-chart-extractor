@@ -9,6 +9,7 @@ export default defineConfig({
       'storage',
       'activeTab',
       'sidePanel',
+      'tabs',
     ],
     host_permissions: [
       'https://fireant.vn/*',

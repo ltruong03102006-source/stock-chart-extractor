@@ -457,6 +457,19 @@ export default defineContentScript({
         return extractAllIndicators(w?.model()?.m_model);
       },
       getWatchlists: () => extractWatchlists(),
+      status: () => {
+        const found = locateChartWidget();
+        const w = activeChartWidget || found?.widget;
+        const model = w?.model()?.m_model;
+        return {
+          connected: Boolean(w && model),
+          location: found?.location || (activeChartWidget ? 'cached_widget' : 'none'),
+          drawingsCount: model?.allLineTools?.()?.length ?? 0,
+          studiesCount: model?.allStudies?.()?.length ?? 0,
+          isTopFrame,
+          url: window.location.href,
+        };
+      },
       syncNow: () => {
         broadcastSnapshot();
         broadcastIndicators();
@@ -465,11 +478,38 @@ export default defineContentScript({
     };
 
     /**
-     * Polling detector for chartWidget across window and child iframes
+     * Immediate Watchlist extraction for Top Frame
+     * Watchlist is stored in localStorage (persist:watchlists) and does NOT depend on chartWidget!
+     */
+    if (isTopFrame) {
+      broadcastWatchlist();
+      setTimeout(broadcastWatchlist, 300);
+      setTimeout(broadcastWatchlist, 1000);
+      setTimeout(broadcastWatchlist, 2500);
+
+      window.addEventListener('storage', (e) => {
+        if (!e.key || /watch|symbol|persist|fireant/i.test(e.key)) {
+          broadcastWatchlist();
+        }
+      });
+    }
+
+    /**
+     * Resilient polling detector for chartWidget across window and child iframes.
+     * Continues polling even after initial 30s to handle SPA page transitions.
      */
     let attempts = 0;
-    const maxAttempts = 60; // 30 seconds
-    const intervalMs = 500;
+    let syncIntervalStarted = false;
+
+    function startPeriodicSync() {
+      if (syncIntervalStarted) return;
+      syncIntervalStarted = true;
+      setInterval(() => {
+        broadcastSnapshot();
+        broadcastIndicators();
+        if (isTopFrame) broadcastWatchlist();
+      }, 1000);
+    }
 
     const timer = setInterval(() => {
       attempts++;
@@ -481,14 +521,6 @@ export default defineContentScript({
         if (model && model.m_model && typeof model.m_model.allLineTools === 'function') {
           const tools = model.m_model.allLineTools();
 
-          // Check if points have been restored by TradingView
-          const hasPoints = tools.length === 0 || tools.some((t: any) => extractSafePoints(t).length > 0);
-
-          if (!hasPoints && attempts < maxAttempts - 10) {
-            // Points still restoring from layout, wait for next tick
-            return;
-          }
-
           clearInterval(timer);
           console.log(`[Stock Chart Extractor][Main World] ✅ SUCCESS: Connected to chart widget at [${found.location}]!`);
           logToolsInventory(tools);
@@ -496,16 +528,17 @@ export default defineContentScript({
           // Broadcast initial snapshots
           broadcastSnapshot();
           broadcastIndicators();
-          broadcastWatchlist();
+          if (isTopFrame) broadcastWatchlist();
 
           // Continuously sync every 1 second
-          setInterval(() => {
-            broadcastSnapshot();
-            broadcastIndicators();
-            broadcastWatchlist();
-          }, 1000);
+          startPeriodicSync();
           return;
         }
+      }
+
+      // In top frame, broadcast watchlist on early ticks even while chart is loading
+      if (isTopFrame && attempts % 4 === 0) {
+        broadcastWatchlist();
       }
 
       // Progress log every 10 attempts (5s) in top frame
@@ -513,14 +546,22 @@ export default defineContentScript({
         console.log(`[Stock Chart Extractor][Main World] Still locating chart widget... (${attempts * 0.5}s elapsed)`);
       }
 
-      // Timeout diagnosis in top frame
-      if (attempts >= maxAttempts) {
+      // After 60 attempts (30s), relax polling to every 2s rather than giving up completely
+      if (attempts >= 60) {
         clearInterval(timer);
-        if (isTopFrame) {
-          console.warn('[Stock Chart Extractor][Main World] ⚠️ Timed out locating chart widget.');
-        }
+        setInterval(() => {
+          if (!activeChartWidget) {
+            const retryFound = locateChartWidget();
+            if (retryFound?.widget?.model?.()?.m_model?.allLineTools) {
+              activeChartWidget = retryFound.widget;
+              console.log(`[Stock Chart Extractor][Main World] ✅ Late connection to chart widget at [${retryFound.location}]!`);
+              startPeriodicSync();
+            }
+          }
+          if (isTopFrame) broadcastWatchlist();
+        }, 2000);
       }
-    }, intervalMs);
+    }, 500);
 
     // Listen for requests from Isolated World
     window.addEventListener('message', (event) => {
@@ -529,13 +570,19 @@ export default defineContentScript({
       }
 
       if (event.data.type === 'REQUEST_SYNC' || event.data.type === 'PING') {
+        if (!activeChartWidget) {
+          const lateFound = locateChartWidget();
+          if (lateFound?.widget?.model?.()?.m_model) {
+            activeChartWidget = lateFound.widget;
+          }
+        }
         broadcastSnapshot();
         broadcastIndicators();
-        broadcastWatchlist();
+        if (isTopFrame) broadcastWatchlist();
       } else if (event.data.type === 'REQUEST_INDICATORS_SYNC') {
         broadcastIndicators();
       } else if (event.data.type === 'REQUEST_WATCHLIST_SYNC') {
-        broadcastWatchlist();
+        if (isTopFrame) broadcastWatchlist();
       }
     });
   },
