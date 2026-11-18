@@ -296,6 +296,10 @@ function renderDrawings(snapshot: ChartSnapshot) {
   if (selectedStockBadgesEl && symbol !== '---') {
     const platformName = snapshot.platform === 'tradingview' ? 'TradingView' : 'FireAnt';
     selectedStockBadgesEl.innerHTML = `<span class="badge badge-synced">● Active Chart (${platformName})</span>`;
+    const platformNameHeaderEl = document.getElementById('platform-name');
+    if (platformNameHeaderEl && platformNameHeaderEl.textContent !== platformName) {
+      platformNameHeaderEl.textContent = platformName;
+    }
   }
 
   const total = snapshot.drawings?.length ?? 0;

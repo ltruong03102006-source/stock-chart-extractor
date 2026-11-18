@@ -192,6 +192,19 @@ export default defineContentScript({
             }
           }
 
+          // Refine Exchange if still default 'US'
+          if (exchange === 'US') {
+            if (urlSymbol && urlSymbol.includes(':')) {
+              const parts = urlSymbol.split(':');
+              if (parts[0]) exchange = parts[0].trim().toUpperCase();
+            } else if (document.title) {
+              const titleMatch = document.title.match(/[\d,.]+\s+([A-Z]{2,10})\s*[·—\-]/i);
+              if (titleMatch && titleMatch[1]) {
+                exchange = titleMatch[1].trim().toUpperCase();
+              }
+            }
+          }
+
           if (!symbol || symbol === 'UNKNOWN' || symbol === 'BI' || symbol.length < 1) {
             return null;
           }

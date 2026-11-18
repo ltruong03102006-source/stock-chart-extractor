@@ -13,13 +13,13 @@ export default defineContentScript({
     console.log('[Stock Chart Extractor][TradingView Bridge] Main World Bridge initializing...');
 
     let cachedDrawings: DrawingObject[] = [];
-    let cachedChartModel: any = null;
     let lastBroadcastSignature = '';
     let lastBroadcastContextKey = '';
-    let webpackRequire: any = null;
+    let activeChartId = '';
+    let layoutFetched = false;
 
     /**
-     * Unwraps TradingView Property values (e.g. property.value() or raw value)
+     * Unwraps TradingView Property values (e.g. property.value() or raw value) safely
      */
     function unwrapValue(val: any): any {
       if (val === null || val === undefined) return val;
@@ -34,7 +34,7 @@ export default defineContentScript({
     }
 
     /**
-     * Detects active chart context directly from TradingView runtime / DOM / React Fiber
+     * Detects active chart context directly from TradingView runtime / DOM / URL / React Fiber
      */
     function detectAndBroadcastTradingViewContext(force = false) {
       try {
@@ -43,26 +43,28 @@ export default defineContentScript({
         let timeframe = 'D';
         let chartId = 'chart-0';
 
-        // 1. Direct Chart Model Inspection (Most authoritative runtime data)
-        if (cachedChartModel) {
-          try {
-            const ms = typeof cachedChartModel.mainSeries === 'function' ? cachedChartModel.mainSeries() : cachedChartModel.mainSeries;
-            if (ms) {
-              const rawSym = typeof ms.symbol === 'function' ? ms.symbol() : ms.symbol;
-              if (rawSym && typeof rawSym === 'string') symbol = rawSym;
+        // 1. URL Path & Query Parameters (Highest priority for Layout ID and Exchange)
+        try {
+          const u = new URL(window.location.href);
+          const pathParts = u.pathname.split('/').filter(Boolean);
+          if (pathParts[0] === 'chart' && pathParts.length >= 2 && pathParts[1]) {
+            chartId = pathParts[1];
+          }
 
-              const rawInt = typeof ms.interval === 'function' ? ms.interval() : ms.interval;
-              if (rawInt && typeof rawInt === 'string') timeframe = rawInt;
-
-              const si = typeof ms.symbolInfo === 'function' ? ms.symbolInfo() : ms.symbolInfo;
-              if (si) {
-                if (si.ticker) symbol = String(si.ticker);
-                else if (si.name) symbol = String(si.name);
-                if (si.exchange) exchange = String(si.exchange);
-              }
+          const sParam = u.searchParams.get('symbol');
+          if (sParam) {
+            if (sParam.includes(':')) {
+              const parts = sParam.split(':');
+              if (parts[0]) exchange = parts[0].trim().toUpperCase();
+              if (parts[1]) symbol = parts[1].trim().toUpperCase();
+            } else {
+              symbol = sParam.trim().toUpperCase();
             }
-          } catch {}
-        }
+          }
+
+          const intv = u.searchParams.get('interval');
+          if (intv) timeframe = intv.trim().toUpperCase();
+        } catch {}
 
         // 2. React Fiber Inspection on Header Toolbar Symbol Search Button
         if (!symbol) {
@@ -74,7 +76,7 @@ export default defineContentScript({
               if (fiberKey) {
                 let curr = (btn as any)[fiberKey];
                 let depth = 0;
-                while (curr && depth < 25) {
+                while (curr && depth < 20) {
                   depth++;
                   const p = curr.memoizedProps;
                   if (p) {
@@ -112,30 +114,42 @@ export default defineContentScript({
           } catch {}
         }
 
-        // 4. Fallback: URL Search Parameters
-        if (!symbol) {
+        // 4. Fallback: Document Title Regex
+        if (!symbol && document.title) {
           try {
-            const u = new URL(window.location.href);
-            const pathParts = u.pathname.split('/').filter(Boolean);
-            if (pathParts[0] === 'chart' && pathParts.length >= 2 && pathParts[1]) {
-              chartId = pathParts[1];
-            }
-            const s = u.searchParams.get('symbol');
-            if (s) {
-              if (s.includes(':')) {
-                const parts = s.split(':');
-                if (parts[0]) exchange = parts[0];
-                if (parts[1]) symbol = parts[1];
-              } else {
-                symbol = s;
+            const title = document.title.trim();
+            const m1 = title.match(/^([A-Z0-9.\-_]{1,10})\s+([0-9]+[DWMmhd]?|[DWM])\s*[·—\-]/i);
+            if (m1 && m1[1]) {
+              symbol = m1[1];
+              if (m1[2]) timeframe = m1[2].toUpperCase();
+            } else {
+              const m2 = title.match(/^([A-Z0-9.\-_]{1,10})\s+[\d,.]+(?:\s+([A-Z]{2,10}))?\s*(?:[▲▼+\-−].*?)?\s*[·—\-]/i);
+              if (m2 && m2[1]) {
+                symbol = m2[1];
+                if (m2[2]) exchange = m2[2].toUpperCase();
               }
             }
-            const intv = u.searchParams.get('interval');
-            if (intv) timeframe = intv;
           } catch {}
         }
 
-        // Clean & Normalize
+        // 5. Refine Exchange from URL or Title if still default 'US'
+        if (exchange === 'US') {
+          try {
+            const u = new URL(window.location.href);
+            const sParam = u.searchParams.get('symbol');
+            if (sParam && sParam.includes(':')) {
+              const p = sParam.split(':');
+              if (p[0]) exchange = p[0].trim().toUpperCase();
+            } else if (document.title) {
+              const titleMatch = document.title.match(/[\d,.]+\s+([A-Z]{2,10})\s*[·—\-]/i);
+              if (titleMatch && titleMatch[1]) {
+                exchange = titleMatch[1].trim().toUpperCase();
+              }
+            }
+          } catch {}
+        }
+
+        // Normalize
         if (symbol.includes(':')) {
           const parts = symbol.split(':');
           if (parts[0]) exchange = parts[0];
@@ -153,8 +167,15 @@ export default defineContentScript({
         const compositeKey = `${cleanSymbol}_${cleanExchange}_${cleanTf}`;
 
         if (force || compositeKey !== lastBroadcastContextKey) {
-          lastBroadcastContextKey = compositeKey;
           console.log(`[Stock Chart Extractor][TradingView Bridge] 📍 Context Broadcast: ${compositeKey} (forced: ${force})`);
+          lastBroadcastContextKey = compositeKey;
+
+          if (chartId !== activeChartId) {
+            activeChartId = chartId;
+            layoutFetched = false;
+            cachedDrawings = [];
+            lastBroadcastSignature = '';
+          }
 
           window.postMessage({
             source: EXTENSION_SOURCE,
@@ -171,11 +192,32 @@ export default defineContentScript({
           }, '*');
         }
 
-        return { symbol: cleanSymbol, exchange: cleanExchange, timeframe: cleanTf, compositeKey };
-      } catch (err) {
-        console.warn('[Stock Chart Extractor][TradingView Bridge] Context detection warning:', err);
+        return { symbol: cleanSymbol, exchange: cleanExchange, timeframe: cleanTf, chartId, compositeKey };
+      } catch {
         return null;
       }
+    }
+
+    /**
+     * Checks if a candidate object qualifies as a LineTool / Drawing
+     */
+    function isCandidateLineTool(src: any): boolean {
+      if (!src || typeof src !== 'object') return false;
+      try {
+        const name = typeof src.name === 'function' ? src.name() : (src.name || src.type || '');
+        if (typeof name === 'string' && (name.startsWith('LineTool') || name.startsWith('linetool') || name.includes('LineTool'))) {
+          return true;
+        }
+        if (typeof src.isLineTool === 'function' && src.isLineTool()) {
+          return true;
+        }
+        if (src.points && (Array.isArray(src.points) || typeof src.points === 'function')) {
+          if (src.properties || typeof src.properties === 'function' || src.state || src.id) {
+            return true;
+          }
+        }
+      } catch {}
+      return false;
     }
 
     /**
@@ -188,34 +230,38 @@ export default defineContentScript({
         // 1. Resolve Identifier
         let id = '';
         if (typeof tool.id === 'function') {
-          id = String(tool.id());
-        } else {
-          id = String(tool.id || tool._id || `tv_${Math.random().toString(36).substr(2, 9)}`);
+          try { id = String(tool.id()); } catch {}
+        }
+        if (!id) {
+          id = String(tool.id || tool._id || tool.linkKey || `tv_${Math.random().toString(36).substr(2, 9)}`);
         }
 
         // 2. Resolve Name & Type
         let name = '';
         if (typeof tool.name === 'function') {
-          name = String(tool.name());
-        } else {
-          name = String(tool.name || tool.type || 'LineToolUnknown');
+          try { name = String(tool.name()); } catch {}
         }
-        const type = name.replace(/^LineTool/, '').toLowerCase();
+        if (!name) {
+          name = String(tool.name || tool.type || 'LineToolTrendLine');
+        }
+        const type = name.replace(/^LineTool/, '').toLowerCase() || 'trend_line';
 
         // 3. Resolve Points (Coordinates)
         let rawPoints: any[] = [];
         if (typeof tool.points === 'function') {
-          rawPoints = tool.points() || [];
+          try { rawPoints = tool.points() || []; } catch {}
         } else if (Array.isArray(tool.points)) {
           rawPoints = tool.points;
         } else if (Array.isArray(tool.state?.points)) {
           rawPoints = tool.state.points;
         } else if (typeof tool.getPoint === 'function') {
-          for (let i = 0; i < 10; i++) {
-            const pt = tool.getPoint(i);
-            if (pt) rawPoints.push(pt);
-            else break;
-          }
+          try {
+            for (let i = 0; i < 6; i++) {
+              const pt = tool.getPoint(i);
+              if (pt) rawPoints.push(pt);
+              else break;
+            }
+          } catch {}
         }
 
         const points: DrawingPoint[] = [];
@@ -224,17 +270,17 @@ export default defineContentScript({
             if (!pt || typeof pt !== 'object') continue;
             let timeMs: number | undefined;
             const timeVal = unwrapValue(pt.time_t ?? pt.time);
-            if (typeof timeVal === 'number') {
+            if (typeof timeVal === 'number' && !isNaN(timeVal)) {
               timeMs = timeVal > 1e11 ? timeVal : timeVal * 1000;
             }
 
             const priceVal = unwrapValue(pt.price);
-            const indexVal = unwrapValue(pt.index);
+            const numPrice = Number(priceVal);
 
             points.push({
-              price: typeof priceVal === 'number' ? priceVal : (Number(priceVal) || 0),
+              price: !isNaN(numPrice) ? numPrice : 0,
               time: timeMs,
-              index: typeof indexVal === 'number' ? indexVal : undefined,
+              index: typeof pt.index === 'number' ? pt.index : undefined,
             });
           }
         }
@@ -242,26 +288,24 @@ export default defineContentScript({
         // 4. Resolve Visual Properties & Style
         let rawState: any = {};
         if (typeof tool.properties === 'function') {
-          rawState = tool.properties() || {};
+          try { rawState = tool.properties() || {}; } catch {}
         } else if (tool.properties && typeof tool.properties === 'object') {
           rawState = tool.properties;
         } else if (tool.state && typeof tool.state === 'object') {
           rawState = tool.state;
         }
 
-        const linecolor = unwrapValue(rawState.linecolor || rawState.color || rawState.lineColor || null);
-        const linewidth = unwrapValue(rawState.linewidth || rawState.width || rawState.lineWidth || null);
-        const linestyle = unwrapValue(rawState.linestyle || rawState.lineStyle || null);
-        const transparency = unwrapValue(rawState.transparency ?? null);
+        const linecolor = unwrapValue(rawState.linecolor || rawState.color || rawState.lineColor || '#2962ff');
+        const linewidth = unwrapValue(rawState.linewidth || rawState.width || rawState.lineWidth || 2);
+        const linestyle = unwrapValue(rawState.linestyle || rawState.lineStyle || 0);
         const fillBackground = unwrapValue(rawState.fillBackground ?? false);
         const backgroundColor = unwrapValue(rawState.backgroundColor || null);
         const text = unwrapValue(rawState.text || null);
 
         const style: Record<string, unknown> = {
-          linecolor: typeof linecolor === 'string' ? linecolor : null,
-          linewidth: typeof linewidth === 'number' ? linewidth : (Number(linewidth) || null),
-          linestyle: typeof linestyle === 'number' ? linestyle : null,
-          transparency: typeof transparency === 'number' ? transparency : null,
+          linecolor: typeof linecolor === 'string' ? linecolor : '#2962ff',
+          linewidth: typeof linewidth === 'number' ? linewidth : (Number(linewidth) || 2),
+          linestyle: typeof linestyle === 'number' ? linestyle : 0,
           fillBackground: Boolean(fillBackground),
           backgroundColor: typeof backgroundColor === 'string' ? backgroundColor : null,
           text: typeof text === 'string' ? text : null,
@@ -284,8 +328,7 @@ export default defineContentScript({
           locked,
           updatedAt: Date.now(),
         };
-      } catch (err) {
-        console.warn('[Stock Chart Extractor][TradingView Bridge] Normalization error:', err);
+      } catch {
         return null;
       }
     }
@@ -294,395 +337,173 @@ export default defineContentScript({
      * Compute drawing signature for change detection
      */
     function computeDrawingsSignature(drawings: DrawingObject[]): string {
-      return drawings.map((d) => {
-        const pts = (d.points || []).map((p) => `${Number(p.price).toFixed(2)}@${p.index ?? p.time ?? ''}`).join(',');
-        const st = `${d.style.linecolor ?? ''}_${d.style.linewidth ?? ''}_${d.style.backgroundColor ?? ''}`;
-        return `${d.id}:${pts}:${st}:${d.visible}:${d.locked}`;
-      }).join(';');
+      try {
+        return drawings.map((d) => {
+          if (!d) return '';
+          const pts = (d.points || []).map((p) => {
+            const pr = typeof p?.price === 'number' ? p.price.toFixed(2) : '0.00';
+            return `${pr}@${p?.index ?? p?.time ?? ''}`;
+          }).join(',');
+          const st = `${d.style?.linecolor ?? ''}_${d.style?.linewidth ?? ''}_${d.style?.backgroundColor ?? ''}`;
+          return `${d.id}:${pts}:${st}:${d.visible}:${d.locked}`;
+        }).join(';');
+      } catch {
+        return '';
+      }
     }
 
     /**
      * Broadcast drawings snapshot to Isolated World Content Script
      */
     function broadcastDrawings(drawings: DrawingObject[], force = false) {
-      const sig = computeDrawingsSignature(drawings);
-      if (!force && sig === lastBroadcastSignature) return;
+      try {
+        const sig = computeDrawingsSignature(drawings);
+        if (!force && sig === lastBroadcastSignature) return;
 
-      lastBroadcastSignature = sig;
-      cachedDrawings = drawings;
+        lastBroadcastSignature = sig;
+        cachedDrawings = drawings;
 
-      const currentCtx = detectAndBroadcastTradingViewContext() || {
-        symbol: 'TRADINGVIEW',
-        exchange: 'US',
-        timeframe: 'D',
-      };
+        const currentCtx = detectAndBroadcastTradingViewContext() || {
+          symbol: 'TRADINGVIEW',
+          exchange: 'US',
+          timeframe: 'D',
+        };
 
-      console.log(`[Stock Chart Extractor][TradingView Bridge] Broadcasting ${drawings.length} drawing(s) for ${currentCtx.symbol}`);
+        console.log(`[Stock Chart Extractor][TradingView Bridge] 📡 Broadcasting ${drawings.length} drawing(s) for ${currentCtx.symbol}`);
 
-      window.postMessage({
-        source: EXTENSION_SOURCE,
-        type: 'DRAWINGS_SNAPSHOT',
-        payload: {
-          schemaVersion: '1.0',
-          platform: 'tradingview',
-          chart: {
-            symbol: currentCtx.symbol,
-            exchange: currentCtx.exchange,
-            timeframe: currentCtx.timeframe,
-            totalDrawings: drawings.length,
+        window.postMessage({
+          source: EXTENSION_SOURCE,
+          type: 'DRAWINGS_SNAPSHOT',
+          payload: {
+            schemaVersion: '1.0',
+            platform: 'tradingview',
+            chart: {
+              symbol: currentCtx.symbol,
+              exchange: currentCtx.exchange,
+              timeframe: currentCtx.timeframe,
+              totalDrawings: drawings.length,
+            },
+            drawings,
+            sync: {
+              status: 'synced',
+              lastUpdated: Date.now(),
+              totalDrawings: drawings.length,
+            },
           },
-          drawings,
-          sync: {
-            status: 'synced',
-            lastUpdated: Date.now(),
-            totalDrawings: drawings.length,
-          },
-        },
-        timestamp: Date.now(),
-      }, '*');
+          timestamp: Date.now(),
+        }, '*');
+      } catch {}
     }
 
     /**
-     * Checks if a candidate object qualifies as a LineTool / Drawing
+     * Merges newly discovered drawings into cache without losing previously detected ones
      */
-    function isCandidateLineTool(src: any): boolean {
-      if (!src || typeof src !== 'object') return false;
-      try {
-        const name = typeof src.name === 'function' ? src.name() : (src.name || src.type || '');
-        if (typeof name === 'string' && (name.startsWith('LineTool') || name.startsWith('linetool') || name.includes('LineTool'))) {
-          return true;
-        }
-        if (typeof src.isLineTool === 'function' && src.isLineTool()) {
-          return true;
-        }
-        if (typeof src.points === 'function' || Array.isArray(src.points) || src.timeAxisPoints || src.priceAxisPoints) {
-          if (src.properties || typeof src.properties === 'function' || src.state) {
-            return true;
-          }
-        }
-      } catch {}
-      return false;
+    function mergeAndBroadcastDrawings(newDrawings: DrawingObject[], force = false) {
+      if (!newDrawings || newDrawings.length === 0) return;
+
+      const drawingMap = new Map<string, DrawingObject>();
+
+      // Preserve existing cache
+      for (const d of cachedDrawings) {
+        if (d && d.id) drawingMap.set(d.id, d);
+      }
+
+      // Merge newly discovered items
+      for (const d of newDrawings) {
+        if (d && d.id) drawingMap.set(d.id, d);
+      }
+
+      const merged = Array.from(drawingMap.values());
+      broadcastDrawings(merged, force);
     }
 
     /**
-     * Extracts drawings from a verified ChartModel instance
+     * Recursively extracts drawings from any complex object, payload, or layout tree
      */
-    function extractDrawingsFromModel(model: any): DrawingObject[] {
-      if (!model) return [];
-      const rawTools: any[] = [];
-
-      try {
-        // 1. Direct allLineTools()
-        if (typeof model.allLineTools === 'function') {
-          const res = model.allLineTools();
-          if (Array.isArray(res) && res.length > 0) rawTools.push(...res);
-        }
-      } catch {}
-
-      try {
-        // 2. Direct lineTools()
-        if (rawTools.length === 0 && typeof model.lineTools === 'function') {
-          const res = model.lineTools();
-          if (Array.isArray(res) && res.length > 0) rawTools.push(...res);
-        }
-      } catch {}
-
-      try {
-        // 3. Panes sources
-        if (rawTools.length === 0 && typeof model.panes === 'function') {
-          const panes = model.panes() || [];
-          for (const p of panes) {
-            if (!p) continue;
-            const sources = typeof p.sources === 'function' ? p.sources() : (Array.isArray(p.sources) ? p.sources : []);
-            for (const s of sources) {
-              if (isCandidateLineTool(s)) rawTools.push(s);
-            }
-            const ordered = typeof p.orderedSources === 'function' ? p.orderedSources() : [];
-            for (const s of ordered) {
-              if (isCandidateLineTool(s) && !rawTools.includes(s)) rawTools.push(s);
-            }
-          }
-        }
-      } catch {}
-
-      try {
-        // 4. m_model nested (FireAnt / Charting Library pattern)
-        if (rawTools.length === 0 && model.m_model) {
-          return extractDrawingsFromModel(model.m_model);
-        }
-      } catch {}
-
-      try {
-        // 5. lineToolsAndGroupsState
-        if (rawTools.length === 0 && typeof model.lineToolsAndGroupsState === 'function') {
-          const state = model.lineToolsAndGroupsState();
-          if (Array.isArray(state?.lineTools)) rawTools.push(...state.lineTools);
-        }
-      } catch {}
-
-      return rawTools.map(normalizeTradingViewLineTool).filter((d): d is DrawingObject => Boolean(d));
-    }
-
-    /**
-     * Inspects an object to find ChartModel or LineTool instances
-     */
-    function findModelOrToolsFromObject(obj: any, visited = new Set(), depth = 0): { model: any | null; tools: any[] } {
-      const result = { model: null as any, tools: [] as any[] };
-      if (!obj || typeof obj !== 'object' || depth > 5 || visited.has(obj)) return result;
+    function extractDrawingsFromAnyObject(obj: any, visited = new Set(), depth = 0): any[] {
+      if (!obj || typeof obj !== 'object' || depth > 8 || visited.has(obj)) return [];
       visited.add(obj);
 
+      const found: any[] = [];
+
       try {
-        // Check if obj itself is a ChartModel
-        if (typeof obj.allLineTools === 'function' || typeof obj.panes === 'function') {
-          result.model = obj;
-          return result;
-        }
-
-        if (typeof obj.model === 'function') {
-          const m = obj.model();
-          if (m && (typeof m.allLineTools === 'function' || typeof m.panes === 'function' || m.m_model)) {
-            result.model = m.m_model || m;
-            return result;
-          }
-        }
-
-        if (obj.m_model && (typeof obj.m_model.allLineTools === 'function' || typeof obj.m_model.panes === 'function')) {
-          result.model = obj.m_model;
-          return result;
-        }
-
-        if (obj.chartModel && (typeof obj.chartModel.allLineTools === 'function' || typeof obj.chartModel.panes === 'function')) {
-          result.model = obj.chartModel;
-          return result;
-        }
-
-        // Check if obj is a LineTool
+        // Direct line tool candidate
         if (isCandidateLineTool(obj)) {
-          result.tools.push(obj);
-          if (typeof obj.model === 'function') {
-            const m = obj.model();
-            if (m) {
-              result.model = m.m_model || m;
-              return result;
-            }
+          found.push(obj);
+          return found;
+        }
+
+        // Check lineToolsAndGroupsState
+        if (obj.lineToolsAndGroupsState?.lineTools && Array.isArray(obj.lineToolsAndGroupsState.lineTools)) {
+          for (const t of obj.lineToolsAndGroupsState.lineTools) {
+            if (isCandidateLineTool(t)) found.push(t);
           }
         }
 
-        // Check relevant properties
-        const candidateKeys = [
-          'chartWidget', 'chartModel', 'model', 'activeChart', 'chart', '_chart',
-          'source', 'sources', 'lineTool', 'lineTools', 'activeTool', 'tool',
-          'pane', 'panes', 'lineToolsModel'
-        ];
-
-        for (const k of candidateKeys) {
-          if (obj[k]) {
-            if (Array.isArray(obj[k])) {
-              for (const item of obj[k]) {
-                const sub = findModelOrToolsFromObject(item, visited, depth + 1);
-                if (sub.model) {
-                  result.model = sub.model;
-                  return result;
-                }
-                if (sub.tools.length > 0) result.tools.push(...sub.tools);
-              }
-            } else {
-              const sub = findModelOrToolsFromObject(obj[k], visited, depth + 1);
-              if (sub.model) {
-                result.model = sub.model;
-                return result;
-              }
-              if (sub.tools.length > 0) result.tools.push(...sub.tools);
-            }
+        // Check sources array
+        if (Array.isArray(obj.sources)) {
+          for (const s of obj.sources) {
+            if (isCandidateLineTool(s)) found.push(s);
           }
+        }
+
+        // Check lineTools array
+        if (Array.isArray(obj.lineTools)) {
+          for (const t of obj.lineTools) {
+            if (isCandidateLineTool(t)) found.push(t);
+          }
+        }
+
+        // Check panes
+        if (Array.isArray(obj.panes)) {
+          for (const p of obj.panes) {
+            found.push(...extractDrawingsFromAnyObject(p, visited, depth + 1));
+          }
+        }
+
+        // Check charts
+        if (Array.isArray(obj.charts)) {
+          for (const c of obj.charts) {
+            found.push(...extractDrawingsFromAnyObject(c, visited, depth + 1));
+          }
+        }
+
+        // Check nested content string (JSON or Base64)
+        if (typeof obj.content === 'string') {
+          try {
+            const parsed = JSON.parse(obj.content);
+            found.push(...extractDrawingsFromAnyObject(parsed, visited, depth + 1));
+          } catch {
+            try {
+              const parsed = JSON.parse(atob(obj.content));
+              found.push(...extractDrawingsFromAnyObject(parsed, visited, depth + 1));
+            } catch {}
+          }
+        }
+
+        // Check data property
+        if (obj.data && typeof obj.data === 'object') {
+          found.push(...extractDrawingsFromAnyObject(obj.data, visited, depth + 1));
         }
       } catch {}
 
-      return result;
+      return found;
     }
 
     /**
-     * Scans React Fiber tree from candidate DOM elements
-     */
-    function scanReactFiber(): DrawingObject[] {
-      const candidates: Element[] = [];
-
-      // 1. Chart containers and canvas wrappers
-      document.querySelectorAll(
-        '.chart-gui-wrapper, .chart-container, [class*="chart-gui-wrapper"], [class*="chart-container-border"], canvas'
-      ).forEach((el) => candidates.push(el));
-
-      // 2. Floating toolbars and overlap manager root (portal container)
-      document.querySelectorAll(
-        '#overlap-manager-root, [class*="floating-toolbar"], [data-name="drawing-toolbar"], div[class*="toolbar-"]'
-      ).forEach((el) => candidates.push(el));
-
-      const foundTools: any[] = [];
-
-      for (const el of candidates) {
-        try {
-          const keys = Object.keys(el);
-          const fiberKey = keys.find((k) => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
-          if (!fiberKey) continue;
-
-          let curr = (el as any)[fiberKey];
-          let depth = 0;
-          while (curr && depth < 35) {
-            depth++;
-
-            // Check stateNode
-            if (curr.stateNode) {
-              const res = findModelOrToolsFromObject(curr.stateNode);
-              if (res.model) {
-                cachedChartModel = res.model;
-                const drawings = extractDrawingsFromModel(res.model);
-                if (drawings.length > 0) return drawings;
-              }
-              if (res.tools.length > 0) foundTools.push(...res.tools);
-            }
-
-            // Check memoizedProps
-            if (curr.memoizedProps) {
-              const res = findModelOrToolsFromObject(curr.memoizedProps);
-              if (res.model) {
-                cachedChartModel = res.model;
-                const drawings = extractDrawingsFromModel(res.model);
-                if (drawings.length > 0) return drawings;
-              }
-              if (res.tools.length > 0) foundTools.push(...res.tools);
-            }
-
-            // Check memoizedState
-            if (curr.memoizedState) {
-              const res = findModelOrToolsFromObject(curr.memoizedState);
-              if (res.model) {
-                cachedChartModel = res.model;
-                const drawings = extractDrawingsFromModel(res.model);
-                if (drawings.length > 0) return drawings;
-              }
-              if (res.tools.length > 0) foundTools.push(...res.tools);
-            }
-
-            curr = curr.return;
-          }
-        } catch {}
-      }
-
-      if (foundTools.length > 0) {
-        return foundTools.map(normalizeTradingViewLineTool).filter((d): d is DrawingObject => Boolean(d));
-      }
-
-      return [];
-    }
-
-    /**
-     * Webpack Module Cache Inspection
-     */
-    function tryHookWebpack(): any {
-      if (webpackRequire) return webpackRequire;
-      try {
-        const wnd = window as any;
-        if (Array.isArray(wnd.webpackChunktradingview) && typeof wnd.webpackChunktradingview.push === 'function') {
-          wnd.webpackChunktradingview.push([
-            [Symbol('sce_probe')],
-            {},
-            (req: any) => { webpackRequire = req; }
-          ]);
-        }
-      } catch {}
-      return webpackRequire;
-    }
-
-    function scanWebpackModules(): DrawingObject[] {
-      try {
-        const req = tryHookWebpack();
-        if (req && req.c && typeof req.c === 'object') {
-          for (const id in req.c) {
-            const mod = req.c[id];
-            if (!mod || !mod.exports) continue;
-            const exp = mod.exports;
-            const res = findModelOrToolsFromObject(exp);
-            if (res.model) {
-              cachedChartModel = res.model;
-              const drawings = extractDrawingsFromModel(res.model);
-              if (drawings.length > 0) return drawings;
-            }
-          }
-        }
-      } catch {}
-      return [];
-    }
-
-    /**
-     * Process parsed layout JSON payload (from LocalStorage, Fetch, or WebSocket)
+     * Process parsed layout JSON payload (from LocalStorage, Fetch, or REST API)
      */
     function processLayoutData(data: any) {
       if (!data || typeof data !== 'object') return;
-
-      let target = data;
-      // Unwrap content string if present
-      if (data.content && typeof data.content === 'string') {
-        try {
-          target = JSON.parse(data.content);
-        } catch {
-          try {
-            target = JSON.parse(atob(data.content));
-          } catch {}
-        }
-      }
-
-      const collectedTools: any[] = [];
-
-      // Check LineToolsAndGroupsState
-      if (target.lineToolsAndGroupsState?.lineTools && Array.isArray(target.lineToolsAndGroupsState.lineTools)) {
-        collectedTools.push(...target.lineToolsAndGroupsState.lineTools);
-      }
-
-      // Check panes and sources
-      if (Array.isArray(target.panes)) {
-        for (const pane of target.panes) {
-          if (Array.isArray(pane?.sources)) {
-            for (const src of pane.sources) {
-              if (src?.type === 'LineTool' || (src?.name && String(src.name).startsWith('LineTool'))) {
-                collectedTools.push(src);
-              }
-            }
+      try {
+        const rawTools = extractDrawingsFromAnyObject(data);
+        if (rawTools.length > 0) {
+          const normalized = rawTools.map(normalizeTradingViewLineTool).filter((d): d is DrawingObject => Boolean(d));
+          if (normalized.length > 0) {
+            mergeAndBroadcastDrawings(normalized);
           }
         }
-      }
-
-      // Check direct sources
-      if (Array.isArray(target.sources)) {
-        for (const src of target.sources) {
-          if (src?.type === 'LineTool' || (src?.name && String(src.name).startsWith('LineTool'))) {
-            collectedTools.push(src);
-          }
-        }
-      }
-
-      // Check charts in multi-chart layout
-      if (Array.isArray(target.charts)) {
-        for (const chart of target.charts) {
-          if (Array.isArray(chart?.panes)) {
-            for (const pane of chart.panes) {
-              if (Array.isArray(pane?.sources)) {
-                for (const src of pane.sources) {
-                  if (src?.type === 'LineTool' || (src?.name && String(src.name).startsWith('LineTool'))) {
-                    collectedTools.push(src);
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-
-      if (collectedTools.length > 0) {
-        const normalized = collectedTools.map(normalizeTradingViewLineTool).filter((d): d is DrawingObject => Boolean(d));
-        if (normalized.length > 0) {
-          broadcastDrawings(normalized);
-        }
-      }
+      } catch {}
     }
 
     /**
@@ -690,9 +511,10 @@ export default defineContentScript({
      */
     function scanLocalStorage() {
       try {
-        const keys = Object.keys(localStorage);
-        for (const key of keys) {
-          if (/chart|layout|linetool|drawing/i.test(key)) {
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (!key) continue;
+          if (/chart|layout|linetool|drawing|storage|state/i.test(key)) {
             const val = localStorage.getItem(key);
             if (val && (val.startsWith('{') || val.startsWith('['))) {
               try {
@@ -706,40 +528,103 @@ export default defineContentScript({
     }
 
     /**
-     * Full Sync Cycle across all runtime paths
+     * Inspects React Fiber on an element safely looking for active tool props
+     */
+    function scanElementFiberForTools(el: Element): any[] {
+      if (!el) return [];
+      const found: any[] = [];
+      try {
+        const keys = Object.keys(el);
+        const fiberKey = keys.find((k) => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+        if (!fiberKey) return found;
+
+        let curr = (el as any)[fiberKey];
+        let depth = 0;
+        while (curr && depth < 20) {
+          depth++;
+          const checkProps = (props: any) => {
+            if (!props || typeof props !== 'object') return;
+            const propNames = ['tool', 'source', 'lineTool', 'item', 'activeTool', 'drawing', 'model'];
+            for (const name of propNames) {
+              const val = props[name];
+              if (val && typeof val === 'object') {
+                if (isCandidateLineTool(val)) {
+                  found.push(val);
+                }
+              }
+            }
+          };
+
+          if (curr.memoizedProps) checkProps(curr.memoizedProps);
+          if (curr.memoizedState) checkProps(curr.memoizedState);
+
+          curr = curr.return;
+        }
+      } catch {}
+      return found;
+    }
+
+    /**
+     * Direct Fetch of Layout via TradingView Public Layout API
+     */
+    function fetchChartLayout(layoutId: string) {
+      if (!layoutId || layoutId === 'chart-0') return;
+      try {
+        fetch(`https://layout.tradingview.com/v1/charts/${layoutId}`, { credentials: 'include' })
+          .then((res) => {
+            if (!res.ok) return null;
+            return res.json();
+          })
+          .then((json) => {
+            if (json) {
+              processLayoutData(json);
+            }
+          })
+          .catch(() => {});
+      } catch {}
+    }
+
+    /**
+     * Full Sync Cycle across all runtime paths (Completely resilient, no unhandled exceptions)
      */
     function syncDrawingsFromRuntime(force = false) {
       try {
-        // Detect context first so drawings are attributed to the correct symbol
-        detectAndBroadcastTradingViewContext(force);
+        // 1. Detect context first
+        const ctx = detectAndBroadcastTradingViewContext(force);
 
-        // 1. If we already hold a verified chart model, read from it
-        if (cachedChartModel) {
-          const drawings = extractDrawingsFromModel(cachedChartModel);
-          if (drawings.length > 0) {
-            broadcastDrawings(drawings, force);
-            return;
+        const collected: any[] = [];
+
+        // 2. Scan Floating Toolbar React Fiber (Captures the active drawing in real-time)
+        try {
+          const activeToolbar = document.querySelector(
+            '[class*="floating-toolbar"], [data-name="drawing-toolbar"], #overlap-manager-root div[class*="toolbar-"]'
+          );
+          if (activeToolbar) {
+            const tools = scanElementFiberForTools(activeToolbar);
+            if (tools.length > 0) collected.push(...tools);
+          }
+        } catch {}
+
+        // 3. Scan LocalStorage for cached layouts
+        try {
+          scanLocalStorage();
+        } catch {}
+
+        // 4. Fetch layout from API if layoutId is available and not yet loaded
+        if (!layoutFetched && ctx?.chartId && ctx.chartId !== 'chart-0') {
+          layoutFetched = true;
+          fetchChartLayout(ctx.chartId);
+        }
+
+        // 5. Merge any collected tools into cache
+        if (collected.length > 0) {
+          const normalized = collected.map(normalizeTradingViewLineTool).filter((d): d is DrawingObject => Boolean(d));
+          if (normalized.length > 0) {
+            mergeAndBroadcastDrawings(normalized, force);
           }
         }
-
-        // 2. React Fiber Scan
-        const fiberDrawings = scanReactFiber();
-        if (fiberDrawings.length > 0) {
-          broadcastDrawings(fiberDrawings, force);
-          return;
-        }
-
-        // 3. Webpack Modules Scan
-        const webpackDrawings = scanWebpackModules();
-        if (webpackDrawings.length > 0) {
-          broadcastDrawings(webpackDrawings, force);
-          return;
-        }
-
-        // 4. LocalStorage Scan
-        scanLocalStorage();
-      } catch (err) {
-        console.warn('[Stock Chart Extractor][TradingView Bridge] Sync error:', err);
+      } catch {
+        // Silent catch prevents DevTools pause on caught exceptions
       }
     }
 
@@ -758,7 +643,7 @@ export default defineContentScript({
     });
 
     // ====================================================
-    // PASSIVE NETWORK INTERCEPTION: window.fetch & window.WebSocket
+    // PASSIVE NETWORK INTERCEPTION: window.fetch (Safe, Non-Destructive)
     // ====================================================
     try {
       const originalFetch = window.fetch;
@@ -777,7 +662,7 @@ export default defineContentScript({
         const response = await originalFetch.apply(this, args);
         try {
           const url = typeof args[0] === 'string' ? args[0] : (args[0] as Request)?.url || '';
-          if (/layout\.tradingview\.com|\/v1\/charts\/|charts-storage|api\/v1\/charts/i.test(url)) {
+          if (/layout\.tradingview\.com|\/v1\/charts|charts-storage|api\/v1\/charts/i.test(url)) {
             response.clone().json().then((json) => {
               if (json) processLayoutData(json);
             }).catch(() => {});
@@ -787,48 +672,8 @@ export default defineContentScript({
       };
     } catch {}
 
-    try {
-      const OriginalWebSocket = window.WebSocket;
-      window.WebSocket = function (...args: any[]) {
-        const ws = new (OriginalWebSocket as any)(...args);
-        try {
-          const parseWs = (dataStr: string) => {
-            const jsonMatch = dataStr.match(/(\{.*\}|\[.*\])/);
-            if (jsonMatch) {
-              const parsed = JSON.parse(jsonMatch[0]);
-              if (Array.isArray(parsed)) {
-                parsed.forEach((item) => { if (item && typeof item === 'object') processLayoutData(item); });
-              } else {
-                processLayoutData(parsed);
-              }
-            }
-          };
-
-          const origSend = ws.send;
-          ws.send = function (data: any) {
-            try {
-              if (typeof data === 'string' && (data.includes('LineTool') || data.includes('linetool') || data.includes('lineTools'))) {
-                parseWs(data);
-              }
-            } catch {}
-            return origSend.apply(this, arguments as any);
-          };
-
-          ws.addEventListener('message', (event: MessageEvent) => {
-            try {
-              if (typeof event.data === 'string' && (event.data.includes('LineTool') || event.data.includes('linetool') || event.data.includes('lineTools'))) {
-                parseWs(event.data);
-              }
-            } catch {}
-          });
-        } catch {}
-        return ws;
-      } as any;
-      window.WebSocket.prototype = OriginalWebSocket.prototype;
-    } catch {}
-
     // ====================================================
-    // DOM OBSERVERS AND EVENT LISTENERS (SAFELY INITIALIZED)
+    // DOM OBSERVERS AND EVENT LISTENERS
     // ====================================================
     function initDomListeners() {
       if (!document.body) {
@@ -836,7 +681,7 @@ export default defineContentScript({
         return;
       }
 
-      // Safe MutationObserver on body for floating toolbar appearances
+      // Safe MutationObserver on body for floating toolbar appearances (drawing selected/drawn)
       try {
         const toolbarObserver = new MutationObserver((mutations) => {
           for (const m of mutations) {
@@ -845,21 +690,19 @@ export default defineContentScript({
                 const el = node as HTMLElement;
                 if (el.matches?.('[class*="floating-toolbar"], [data-name="drawing-toolbar"]') ||
                     el.querySelector?.('[class*="floating-toolbar"], [data-name="drawing-toolbar"]')) {
-                  setTimeout(() => syncDrawingsFromRuntime(), 50);
+                  setTimeout(() => syncDrawingsFromRuntime(true), 50);
                 }
               }
             });
           }
         });
         toolbarObserver.observe(document.body, { childList: true, subtree: true });
-      } catch (err) {
-        console.warn('[Stock Chart Extractor][TradingView Bridge] MutationObserver setup warning:', err);
-      }
+      } catch {}
 
       // User interaction listeners on chart canvas (drawing finished, point dragged, etc.)
       window.addEventListener('mouseup', () => {
         setTimeout(() => syncDrawingsFromRuntime(), 100);
-        setTimeout(() => syncDrawingsFromRuntime(), 400);
+        setTimeout(() => syncDrawingsFromRuntime(), 500);
       }, true);
 
       window.addEventListener('click', () => {
@@ -892,19 +735,19 @@ export default defineContentScript({
       syncDrawingsFromRuntime();
     }, 4500);
 
-    // Periodic sync ensures that drawing edits & context switches are picked up reliably within 1.2s
+    // Periodic sync ensures that drawing edits & context switches are picked up reliably
     setInterval(() => {
       detectAndBroadcastTradingViewContext();
       syncDrawingsFromRuntime();
-    }, 1200);
+    }, 2000);
 
     // Expose global diagnosis helper for Chrome DevTools Console
     (window as any).__STOCK_CHART_EXTRACTOR_TV__ = {
-      getModel: () => cachedChartModel,
       getDrawings: () => cachedDrawings,
       getContext: () => detectAndBroadcastTradingViewContext(true),
       scan: () => syncDrawingsFromRuntime(true),
-      getWebpackRequire: () => webpackRequire,
+      processLayout: (data: any) => processLayoutData(data),
+      fetchLayout: (id: string) => fetchChartLayout(id),
       normalize: normalizeTradingViewLineTool,
     };
 
