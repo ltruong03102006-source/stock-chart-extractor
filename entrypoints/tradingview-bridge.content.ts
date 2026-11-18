@@ -16,6 +16,7 @@ export default defineContentScript({
     let lastBroadcastSignature = '';
     let lastBroadcastContextKey = '';
     let activeChartId = '';
+    let webpackRequire: any = null;
 
     /**
      * Unwraps TradingView Property values (e.g. property.value() or raw value) safely
@@ -167,13 +168,13 @@ export default defineContentScript({
 
         if (force || compositeKey !== lastBroadcastContextKey) {
           console.log(`[Stock Chart Extractor][TradingView Bridge] 📍 Context Broadcast: ${compositeKey} (forced: ${force})`);
-          lastBroadcastContextKey = compositeKey;
 
-          if (chartId !== activeChartId) {
+          if (chartId !== activeChartId || (lastBroadcastContextKey && compositeKey !== lastBroadcastContextKey)) {
             activeChartId = chartId;
             cachedDrawings = [];
             lastBroadcastSignature = '';
           }
+          lastBroadcastContextKey = compositeKey;
 
           window.postMessage({
             source: EXTENSION_SOURCE,
@@ -230,6 +231,11 @@ export default defineContentScript({
      */
     function normalizeTradingViewLineTool(tool: any): DrawingObject | null {
       if (!tool || typeof tool !== 'object') return null;
+
+      // Fast path: already a normalized DrawingObject
+      if (tool.platformId === 'tradingview' && tool.id && Array.isArray(tool.points) && tool.style) {
+        return tool as DrawingObject;
+      }
 
       try {
         // 1. Resolve Identifier
@@ -423,6 +429,388 @@ export default defineContentScript({
     }
 
     /**
+     * Parses TradingView date badges like "Thu 17 Sep '26" or "17 Sep '26" into epoch ms
+     */
+    function parseTradingViewDateBadge(text: string): number | undefined {
+      if (!text) return undefined;
+      try {
+        const months: Record<string, number> = {
+          jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+          jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11
+        };
+
+        const clean = text.replace(/['’]/g, '').trim();
+        const parts = clean.split(/[\s,]+/);
+
+        let day = 0;
+        let month = -1;
+        let year = new Date().getFullYear();
+
+        for (const part of parts) {
+          const lower = part.toLowerCase();
+          if (months[lower] !== undefined) {
+            month = months[lower];
+          } else if (/^\d{1,2}$/.test(part)) {
+            const val = parseInt(part, 10);
+            if (val >= 1 && val <= 31 && day === 0) {
+              day = val;
+            } else if (val >= 20 && val <= 50) {
+              year = 2000 + val;
+            }
+          } else if (/^\d{4}$/.test(part)) {
+            year = parseInt(part, 10);
+          }
+        }
+
+        if (month !== -1 && day > 0) {
+          return Date.UTC(year, month, day, 0, 0, 0);
+        }
+      } catch {}
+      return undefined;
+    }
+
+    /**
+     * Parses numeric price like "3,161.70" into float
+     */
+    function parsePrice(text: string): number | null {
+      if (!text) return null;
+      const clean = text.replace(/,/g, '').trim();
+      const num = parseFloat(clean);
+      return !isNaN(num) && isFinite(num) ? num : null;
+    }
+
+    /**
+     * Helper to resolve computed background color traversing up to 3 parent levels
+     */
+    function getEffectiveBg(el: HTMLElement): string {
+      let curr: HTMLElement | null = el;
+      let depth = 0;
+      while (curr && depth < 3) {
+        try {
+          const bg = window.getComputedStyle(curr).backgroundColor;
+          if (bg && bg !== 'transparent' && bg !== 'rgba(0, 0, 0, 0)' && !bg.includes('255, 255, 255')) {
+            return bg;
+          }
+        } catch {}
+        curr = curr.parentElement;
+        depth++;
+      }
+      return '';
+    }
+
+    /**
+     * Extracts active drawing from DOM Selection: Floating Toolbar + Highlighted Axis Badges
+     */
+    function extractDrawingFromDomSelection(): DrawingObject | null {
+      try {
+        const toolbar = document.querySelector(
+          '.tv-floating-toolbar:not(.i-closed):not(.i-hidden), [class*="floating-toolbar"]:not([class*="hidden"]), [data-name="drawing-toolbar"]'
+        ) || document.querySelector('.tv-floating-toolbar');
+
+        let linewidth = 2;
+        let linecolor = '#2962ff';
+
+        if (toolbar) {
+          const pxEl = Array.from(toolbar.querySelectorAll('*')).find((el) =>
+            /^[1-4]px$/i.test(el.textContent?.trim() || '')
+          );
+          if (pxEl && pxEl.textContent) {
+            linewidth = parseInt(pxEl.textContent.trim(), 10) || 2;
+          }
+
+          toolbar.querySelectorAll('*').forEach((el) => {
+            const style = (el as HTMLElement).style;
+            const bg = style?.backgroundColor;
+            if (bg && bg !== 'transparent' && !bg.includes('rgba(0, 0, 0') && !bg.includes('rgba(255, 255, 255')) {
+              linecolor = bg;
+            }
+          });
+        }
+
+        const highlightedPrices: { price: number; top: number; text: string }[] = [];
+        const highlightedTimes: { time: number; left: number; text: string }[] = [];
+
+        const allLeaves = document.querySelectorAll(
+          '[class*="axis-"] *, [class*="badge"] *, [class*="badge"], [class*="value-"], div, span'
+        );
+
+        allLeaves.forEach((el) => {
+          if (el.children.length > 0 || !el.textContent) return;
+          const text = el.textContent.trim();
+          if (!text || text.length > 30) return;
+
+          const htmlEl = el as HTMLElement;
+          const rect = htmlEl.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) return;
+
+          const bg = getEffectiveBg(htmlEl);
+          const isColoredBg = Boolean(bg);
+
+          // Check if text is a Price
+          if (/^[0-9]{1,3}(,[0-9]{3})*(\.[0-9]{1,4})?$/.test(text)) {
+            const numPrice = parsePrice(text);
+            if (numPrice !== null && numPrice > 0) {
+              const isRightSide = rect.left > window.innerWidth * 0.65;
+              const parentClass = htmlEl.parentElement?.className || '';
+              const isAxisRelated = /axis|price|badge|value|selected|highlight/i.test(`${htmlEl.className} ${parentClass}`);
+
+              if (isColoredBg || (isRightSide && isAxisRelated)) {
+                if (!highlightedPrices.some((x) => Math.abs(x.price - numPrice) < 0.001)) {
+                  highlightedPrices.push({ price: numPrice, top: rect.top, text });
+                }
+              }
+            }
+          }
+
+          // Check if text is a Time/Date badge
+          if (/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i.test(text)) {
+            const timeVal = parseTradingViewDateBadge(text);
+            if (timeVal) {
+              const isBottomSide = rect.top > window.innerHeight * 0.5;
+              const parentClass = htmlEl.parentElement?.className || '';
+              const isAxisRelated = /axis|time|timeline|badge|value|selected|highlight/i.test(`${htmlEl.className} ${parentClass}`);
+
+              if (isColoredBg || (isBottomSide && isAxisRelated)) {
+                if (!highlightedTimes.some((x) => x.time === timeVal)) {
+                  highlightedTimes.push({ time: timeVal, left: rect.left, text });
+                }
+              }
+            }
+          }
+        });
+
+        if (highlightedPrices.length === 0) return null;
+
+        // Sort by coordinates: top-to-bottom for prices, left-to-right for times
+        highlightedPrices.sort((a, b) => a.top - b.top);
+        highlightedTimes.sort((a, b) => a.left - b.left);
+
+        const p0 = highlightedPrices[0];
+        const p1 = highlightedPrices[1];
+        const t0 = highlightedTimes[0];
+        const t1 = highlightedTimes[1];
+
+        const points: DrawingPoint[] = [];
+        if (p0 && p1 && t0 && t1) {
+          points.push({ price: p0.price, time: t0.time });
+          points.push({ price: p1.price, time: t1.time });
+        } else if (p0 && p1) {
+          points.push({ price: p0.price });
+          points.push({ price: p1.price });
+        } else if (p0) {
+          points.push({ price: p0.price, time: t0?.time });
+        }
+
+        if (points.length === 0 || !points[0]) return null;
+
+        const pt0 = points[0];
+        const pt1 = points[1];
+        const id = `tv_dom_${Math.round(pt0.price * 100)}_${pt1 ? Math.round(pt1.price * 100) : 'single'}`;
+        const type = points.length >= 2 ? 'trend_line' : 'horizontal_line';
+        const name = type === 'trend_line' ? 'LineToolTrendLine' : 'LineToolHorzLine';
+
+        return {
+          id,
+          platformId: 'tradingview',
+          type,
+          name,
+          points,
+          properties: { linecolor, linewidth },
+          style: {
+            linecolor,
+            linewidth,
+            linestyle: 0,
+            fillBackground: false,
+            backgroundColor: null,
+            text: null,
+          },
+          visible: true,
+          locked: false,
+          updatedAt: Date.now(),
+        };
+      } catch {
+        return null;
+      }
+    }
+
+    /**
+     * Safe Webpack 5 Hook with unique random string chunk ID
+     */
+    function tryHookWebpack(): any {
+      if (webpackRequire && webpackRequire.c) return webpackRequire;
+      try {
+        const wnd = window as any;
+        const chunkKeys = Object.keys(wnd).filter((k) => k.startsWith('webpackChunk'));
+        for (const key of chunkKeys) {
+          const chunk = wnd[key];
+          if (Array.isArray(chunk) && typeof chunk.push === 'function') {
+            const hookId = 'sce_hook_' + Date.now() + '_' + Math.floor(Math.random() * 10000);
+            try {
+              chunk.push([
+                [hookId],
+                {},
+                (req: any) => {
+                  if (req && req.c && typeof req.c === 'object') {
+                    webpackRequire = req;
+                  }
+                }
+              ]);
+            } catch {}
+            if (webpackRequire && webpackRequire.c) break;
+          }
+        }
+      } catch {}
+      return webpackRequire;
+    }
+
+    /**
+     * Webpack Module Cache Scanner
+     */
+    function scanWebpackModules(): DrawingObject[] {
+      try {
+        const req = tryHookWebpack();
+        if (!req || !req.c || typeof req.c !== 'object') return [];
+
+        const foundTools: any[] = [];
+        const moduleIds = Object.keys(req.c);
+
+        for (const id of moduleIds) {
+          try {
+            const mod = req.c[id];
+            if (!mod || !mod.exports) continue;
+            const exp = mod.exports;
+
+            const checkExport = (target: any) => {
+              if (!target || typeof target !== 'object') return;
+
+              if (isCandidateLineTool(target)) {
+                foundTools.push(target);
+                return;
+              }
+
+              if (typeof target.allLineTools === 'function') {
+                try {
+                  const res = target.allLineTools();
+                  if (Array.isArray(res) && res.length > 0) foundTools.push(...res);
+                } catch {}
+              }
+
+              if (target.m_model && typeof target.m_model === 'object') {
+                if (typeof target.m_model.allLineTools === 'function') {
+                  try {
+                    const res = target.m_model.allLineTools();
+                    if (Array.isArray(res) && res.length > 0) foundTools.push(...res);
+                  } catch {}
+                }
+                if (typeof target.m_model.panes === 'function') {
+                  try {
+                    const panes = target.m_model.panes();
+                    if (Array.isArray(panes)) {
+                      for (const p of panes) {
+                        const sources = typeof p?.sources === 'function' ? p.sources() : (p?.sources || []);
+                        if (Array.isArray(sources)) {
+                          for (const s of sources) {
+                            if (isCandidateLineTool(s)) foundTools.push(s);
+                          }
+                        }
+                      }
+                    }
+                  } catch {}
+                }
+              }
+
+              if (typeof target.model === 'function') {
+                try {
+                  const m = target.model();
+                  if (m) {
+                    if (typeof m.allLineTools === 'function') {
+                      const res = m.allLineTools();
+                      if (Array.isArray(res) && res.length > 0) foundTools.push(...res);
+                    }
+                    if (m.m_model && typeof m.m_model.allLineTools === 'function') {
+                      const res = m.m_model.allLineTools();
+                      if (Array.isArray(res) && res.length > 0) foundTools.push(...res);
+                    }
+                  }
+                } catch {}
+              }
+
+              if (typeof target.panes === 'function') {
+                try {
+                  const panes = target.panes();
+                  if (Array.isArray(panes)) {
+                    for (const p of panes) {
+                      const sources = typeof p?.sources === 'function' ? p.sources() : (p?.sources || []);
+                      if (Array.isArray(sources)) {
+                        for (const s of sources) {
+                          if (isCandidateLineTool(s)) foundTools.push(s);
+                        }
+                      }
+                    }
+                  }
+                } catch {}
+              }
+
+              if (typeof target.activeChart === 'function') {
+                try {
+                  const ac = target.activeChart();
+                  if (ac && typeof ac.getAllShapes === 'function') {
+                    const shapes = ac.getAllShapes();
+                    if (Array.isArray(shapes) && shapes.length > 0) {
+                      for (const sh of shapes) {
+                        if (typeof ac.getShapeById === 'function') {
+                          try {
+                            const tool = ac.getShapeById(sh.id);
+                            if (tool) foundTools.push(tool);
+                            else foundTools.push(sh);
+                          } catch {
+                            foundTools.push(sh);
+                          }
+                        } else {
+                          foundTools.push(sh);
+                        }
+                      }
+                    }
+                  }
+                } catch {}
+              }
+
+              if (typeof target.lineToolsAndGroupsState === 'function') {
+                try {
+                  const st = target.lineToolsAndGroupsState();
+                  if (Array.isArray(st?.lineTools) && st.lineTools.length > 0) {
+                    foundTools.push(...st.lineTools);
+                  }
+                } catch {}
+              }
+
+              if (Array.isArray(target.lineTools) && target.lineTools.length > 0) {
+                for (const t of target.lineTools) {
+                  if (isCandidateLineTool(t)) foundTools.push(t);
+                }
+              }
+              if (Array.isArray(target.sources) && target.sources.length > 0) {
+                for (const s of target.sources) {
+                  if (isCandidateLineTool(s)) foundTools.push(s);
+                }
+              }
+            };
+
+            checkExport(exp);
+            if (exp.default && typeof exp.default === 'object') {
+              checkExport(exp.default);
+            }
+          } catch {}
+        }
+
+        if (foundTools.length > 0) {
+          return foundTools.map(normalizeTradingViewLineTool).filter(Boolean) as DrawingObject[];
+        }
+      } catch {}
+      return [];
+    }
+
+    /**
      * Recursively extracts drawings from any complex object, payload, or layout tree
      */
     function extractDrawingsFromAnyObject(obj: any, visited = new Set(), depth = 0): any[] {
@@ -432,48 +820,41 @@ export default defineContentScript({
       const found: any[] = [];
 
       try {
-        // Direct line tool candidate
         if (isCandidateLineTool(obj)) {
           found.push(obj);
           return found;
         }
 
-        // Check lineToolsAndGroupsState
         if (obj.lineToolsAndGroupsState?.lineTools && Array.isArray(obj.lineToolsAndGroupsState.lineTools)) {
           for (const t of obj.lineToolsAndGroupsState.lineTools) {
             if (isCandidateLineTool(t)) found.push(t);
           }
         }
 
-        // Check sources array
         if (Array.isArray(obj.sources)) {
           for (const s of obj.sources) {
             if (isCandidateLineTool(s)) found.push(s);
           }
         }
 
-        // Check lineTools array
         if (Array.isArray(obj.lineTools)) {
           for (const t of obj.lineTools) {
             if (isCandidateLineTool(t)) found.push(t);
           }
         }
 
-        // Check panes
         if (Array.isArray(obj.panes)) {
           for (const p of obj.panes) {
             found.push(...extractDrawingsFromAnyObject(p, visited, depth + 1));
           }
         }
 
-        // Check charts
         if (Array.isArray(obj.charts)) {
           for (const c of obj.charts) {
             found.push(...extractDrawingsFromAnyObject(c, visited, depth + 1));
           }
         }
 
-        // Check nested content string (JSON or Base64)
         if (typeof obj.content === 'string') {
           try {
             const parsed = JSON.parse(obj.content);
@@ -486,7 +867,6 @@ export default defineContentScript({
           }
         }
 
-        // Check data property
         if (obj.data && typeof obj.data === 'object') {
           found.push(...extractDrawingsFromAnyObject(obj.data, visited, depth + 1));
         }
@@ -542,13 +922,11 @@ export default defineContentScript({
       const tools: any[] = [];
 
       try {
-        // Direct line tool
         if (isCandidateLineTool(obj)) {
           tools.push(obj);
           return tools;
         }
 
-        // 1. Check allLineTools()
         if (typeof obj.allLineTools === 'function') {
           try {
             const res = obj.allLineTools();
@@ -556,7 +934,6 @@ export default defineContentScript({
           } catch {}
         }
 
-        // 2. Check lineTools()
         if (typeof obj.lineTools === 'function') {
           try {
             const res = obj.lineTools();
@@ -566,13 +943,11 @@ export default defineContentScript({
           return obj.lineTools;
         }
 
-        // 3. Check m_model
         if (obj.m_model && typeof obj.m_model === 'object') {
           const sub = inspectCandidate(obj.m_model, visited, depth + 1);
           if (sub.length > 0) return sub;
         }
 
-        // 4. Check model()
         if (typeof obj.model === 'function') {
           try {
             const m = obj.model();
@@ -583,7 +958,6 @@ export default defineContentScript({
           } catch {}
         }
 
-        // 5. Check panes()
         if (typeof obj.panes === 'function') {
           try {
             const panes = obj.panes();
@@ -615,7 +989,6 @@ export default defineContentScript({
           } catch {}
         }
 
-        // 6. Check _panes array
         if (Array.isArray(obj._panes)) {
           for (const p of obj._panes) {
             if (!p) continue;
@@ -632,7 +1005,6 @@ export default defineContentScript({
           }
         }
 
-        // 7. Check lineToolsAndGroupsState
         if (typeof obj.lineToolsAndGroupsState === 'function') {
           try {
             const st = obj.lineToolsAndGroupsState();
@@ -642,7 +1014,6 @@ export default defineContentScript({
           return obj.lineToolsAndGroupsState.lineTools;
         }
 
-        // 8. Check direct sources array
         if (Array.isArray(obj.sources)) {
           for (const item of obj.sources) {
             if (isCandidateLineTool(item)) tools.push(item);
@@ -659,7 +1030,6 @@ export default defineContentScript({
     function scanReactFiberTree(): any[] {
       const candidates: Element[] = [];
 
-      // Priority elements
       document.querySelectorAll(
         '.chart-gui-wrapper, .chart-container, [class*="chart-gui-wrapper"], [class*="chart-container-border"], [class*="floating-toolbar"], [data-name="drawing-toolbar"], #overlap-manager-root, .chart-page'
       ).forEach((el) => candidates.push(el));
@@ -677,13 +1047,11 @@ export default defineContentScript({
           while (curr && depth < 25) {
             depth++;
 
-            // 1. Check class component instance (stateNode)
             if (curr.stateNode && typeof curr.stateNode === 'object') {
               const res = inspectCandidate(curr.stateNode);
               if (res.length > 0) return res;
             }
 
-            // 2. Check function component hooks (useRef, useState)
             let hook = curr.memoizedState;
             let hookCount = 0;
             while (hook && hookCount < 20) {
@@ -699,7 +1067,6 @@ export default defineContentScript({
               hook = hook.next;
             }
 
-            // 3. Check memoizedProps
             if (curr.memoizedProps && typeof curr.memoizedProps === 'object') {
               const p = curr.memoizedProps;
               const propNames = ['tool', 'source', 'lineTool', 'item', 'activeTool', 'drawing', 'model', 'chart', 'chartModel', 'panes'];
@@ -720,6 +1087,31 @@ export default defineContentScript({
     }
 
     /**
+     * Scans DOM elements and canvas wrappers for directly attached chart instances
+     */
+    function scanDomElementsForChartInstance(): any[] {
+      try {
+        const candidates = document.querySelectorAll(
+          '.chart-gui-wrapper, .chart-container, [class*="chart-gui-wrapper"], canvas, [data-name="chart-widget"]'
+        );
+        for (const el of candidates) {
+          const anyEl = el as any;
+          const keys = Object.keys(anyEl);
+          for (const k of keys) {
+            if (/chart|widget|model|panes|sources/i.test(k)) {
+              const val = anyEl[k];
+              if (val && typeof val === 'object') {
+                const tools = inspectCandidate(val);
+                if (tools.length > 0) return tools;
+              }
+            }
+          }
+        }
+      } catch {}
+      return [];
+    }
+
+    /**
      * Full Sync Cycle across all runtime paths
      */
     function syncDrawingsFromRuntime(force = false) {
@@ -729,7 +1121,15 @@ export default defineContentScript({
 
         const collected: any[] = [];
 
-        // 2. Scan React Fiber Tree (Comprehensive search covering chart container, useRef hooks, and floating toolbar)
+        // 2. Scan Webpack Module Cache (Commercial runtime hook)
+        try {
+          const webpackTools = scanWebpackModules();
+          if (webpackTools.length > 0) {
+            collected.push(...webpackTools);
+          }
+        } catch {}
+
+        // 3. Scan React Fiber Tree (Comprehensive search covering chart container and hooks)
         try {
           const fiberTools = scanReactFiberTree();
           if (fiberTools.length > 0) {
@@ -737,12 +1137,28 @@ export default defineContentScript({
           }
         } catch {}
 
-        // 3. Scan LocalStorage for cached layouts
+        // 4. Scan DOM Selection (Toolbar + Axis Badges for active drawing)
+        try {
+          const domDrawing = extractDrawingFromDomSelection();
+          if (domDrawing) {
+            collected.push(domDrawing);
+          }
+        } catch {}
+
+        // 5. Scan DOM Elements directly
+        try {
+          const domTools = scanDomElementsForChartInstance();
+          if (domTools.length > 0) {
+            collected.push(...domTools);
+          }
+        } catch {}
+
+        // 6. Scan LocalStorage for cached layouts
         try {
           scanLocalStorage();
         } catch {}
 
-        // 4. Merge any collected tools into cache
+        // 7. Merge any collected tools into cache
         if (collected.length > 0) {
           const normalized = collected.map(normalizeTradingViewLineTool).filter((d): d is DrawingObject => Boolean(d));
           if (normalized.length > 0) {
@@ -763,6 +1179,9 @@ export default defineContentScript({
       if (event.data.type === 'REQUEST_SYNC' || event.data.type === 'REFRESH_TRADINGVIEW_DRAWINGS') {
         detectAndBroadcastTradingViewContext(true);
         syncDrawingsFromRuntime(true);
+        if (cachedDrawings.length > 0) {
+          broadcastDrawings(cachedDrawings, true);
+        }
       }
     });
 
@@ -826,19 +1245,19 @@ export default defineContentScript({
 
       // User interaction listeners on chart canvas (drawing finished, point dragged, etc.)
       window.addEventListener('mouseup', () => {
-        setTimeout(() => syncDrawingsFromRuntime(), 120);
-        setTimeout(() => syncDrawingsFromRuntime(), 500);
+        setTimeout(() => syncDrawingsFromRuntime(), 100);
+        setTimeout(() => syncDrawingsFromRuntime(), 400);
       }, true);
 
       window.addEventListener('click', () => {
         setTimeout(() => {
           detectAndBroadcastTradingViewContext();
           syncDrawingsFromRuntime();
-        }, 150);
+        }, 120);
         setTimeout(() => {
           detectAndBroadcastTradingViewContext();
           syncDrawingsFromRuntime();
-        }, 600);
+        }, 500);
       }, true);
     }
 
@@ -873,6 +1292,8 @@ export default defineContentScript({
       scan: () => syncDrawingsFromRuntime(true),
       processLayout: (data: any) => processLayoutData(data),
       normalize: normalizeTradingViewLineTool,
+      getWebpackRequire: () => tryHookWebpack(),
+      extractDom: () => extractDrawingFromDomSelection(),
     };
 
     console.log('[Stock Chart Extractor][TradingView Bridge] Multi-path bridge initialized successfully.');
