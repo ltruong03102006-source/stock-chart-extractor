@@ -23,18 +23,21 @@ export function createInitialRegistryState(): StockRegistryState {
 }
 
 /**
- * Pure function: Merges or updates stock information discovered automatically from FireAnt runtime.
+ * Pure function: Merges or updates stock information discovered automatically from a chart platform.
+ * Supports both FireAnt and TradingView runtimes.
  * Implements auto-linking if the stock was previously registered manually.
  */
-export function upsertFromFireAnt(
+export function upsertFromPlatform(
   state: StockRegistryState,
-  context: ChartContextPayload
+  context: ChartContextPayload,
+  platformSource: 'FIREANT' | 'TRADINGVIEW' = 'FIREANT'
 ): StockRegistryState {
   const symbol = normalizeSymbol(context.symbol);
   if (!symbol) return state;
 
   const now = Date.now();
-  const exchange = (context.exchange || 'VN').toUpperCase();
+  const defaultExchange = platformSource === 'TRADINGVIEW' ? 'US' : 'VN';
+  const exchange = (context.exchange || defaultExchange).toUpperCase();
   const timeframe = context.timeframe || 'D';
   const compositeKey = context.compositeKey || buildChartCompositeKey(symbol, timeframe, exchange);
 
@@ -44,9 +47,9 @@ export function upsertFromFireAnt(
   for (const [key, item] of Object.entries(state.items)) {
     if (key === symbol) {
       // Current active stock
-      const sources = item.sources.includes('FIREANT')
+      const sources = item.sources.includes(platformSource)
         ? item.sources
-        : [...item.sources, 'FIREANT' as const];
+        : [...item.sources, platformSource];
 
       // Update or insert context summary
       const existingContexts = [...(item.chartContexts || [])];
@@ -74,6 +77,7 @@ export function upsertFromFireAnt(
         sources,
         isOpened: true,
         isActive: true,
+        platform: platformSource.toLowerCase() as 'fireant' | 'tradingview',
         chartContexts: existingContexts,
         lastDetectedAt: now,
       };
@@ -91,9 +95,10 @@ export function upsertFromFireAnt(
     nextItems[symbol] = {
       symbol,
       exchange,
-      sources: ['FIREANT'],
+      sources: [platformSource],
       isOpened: true,
       isActive: true,
+      platform: platformSource.toLowerCase() as 'fireant' | 'tradingview',
       chartContexts: [
         {
           chartId: context.chartId || 'chart-0',
@@ -116,6 +121,26 @@ export function upsertFromFireAnt(
     items: nextItems,
     updatedAt: now,
   };
+}
+
+/**
+ * Pure function: Merges or updates stock information discovered automatically from FireAnt runtime.
+ */
+export function upsertFromFireAnt(
+  state: StockRegistryState,
+  context: ChartContextPayload
+): StockRegistryState {
+  return upsertFromPlatform(state, context, 'FIREANT');
+}
+
+/**
+ * Pure function: Merges or updates stock information discovered automatically from TradingView runtime.
+ */
+export function upsertFromTradingView(
+  state: StockRegistryState,
+  context: ChartContextPayload
+): StockRegistryState {
+  return upsertFromPlatform(state, context, 'TRADINGVIEW');
 }
 
 /**
@@ -184,8 +209,8 @@ export function removeManualStock(
 
   const nextItems = { ...state.items };
 
-  if (nextSources.includes('FIREANT') && item.isOpened) {
-    // Retain in registry since it is open on FireAnt
+  if ((nextSources.includes('FIREANT') || nextSources.includes('TRADINGVIEW')) && item.isOpened) {
+    // Retain in registry since it is open on FireAnt or TradingView
     nextItems[symbol] = {
       ...item,
       sources: nextSources,
@@ -260,10 +285,15 @@ export function setActiveStock(
   rawSymbol: string | null
 ): StockRegistryState {
   if (!rawSymbol) {
+    const nextItems: Record<string, StockRegistryItem> = {};
+    for (const [key, item] of Object.entries(state.items)) {
+      nextItems[key] = { ...item, isActive: false };
+    }
     return {
       ...state,
       activeSymbol: null,
       activeCompositeKey: null,
+      items: nextItems,
       updatedAt: Date.now(),
     };
   }
@@ -275,10 +305,19 @@ export function setActiveStock(
   const defaultContext = item.chartContexts[0];
   const activeCompositeKey = defaultContext ? defaultContext.compositeKey : null;
 
+  const nextItems: Record<string, StockRegistryItem> = {};
+  for (const [key, it] of Object.entries(state.items)) {
+    nextItems[key] = {
+      ...it,
+      isActive: key === symbol,
+    };
+  }
+
   return {
     ...state,
     activeSymbol: symbol,
     activeCompositeKey,
+    items: nextItems,
     updatedAt: Date.now(),
   };
 }

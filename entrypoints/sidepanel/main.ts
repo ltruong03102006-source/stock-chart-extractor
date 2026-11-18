@@ -8,6 +8,9 @@ import {
 import { ExtensionMessageSchema } from '@/src/messaging/message.schemas';
 import { getAllStocks, normalizeSymbol } from '@/src/registry/stock-registry';
 import { ExportManager } from '@/src/export/export-manager';
+import { StorageRepository } from '@/src/storage/storage-repository';
+import { buildChartCompositeKey } from '@/src/registry/stock-registry.types';
+import type { IsolatedChartSnapshot } from '@/src/models/chart-snapshot.types';
 
 // Global cache state for Side Panel
 let currentRegistryState: StockRegistryState | null = null;
@@ -35,45 +38,148 @@ function updateBadge() {
 }
 
 // ----------------------------------------------------
-// AREA A: STOCK MANAGER RENDERER
+// AREA A: STOCK MANAGER & ACTIVE DETAIL SYNCHRONIZATION
 // ----------------------------------------------------
+function getCurrentlyActiveStock(registry: StockRegistryState | null): any | null {
+  if (!registry || !registry.items) return null;
+  // 1. Primary: Item with isActive === true (strictly from active web chart)
+  const activeItem = Object.values(registry.items).find((item) => item.isActive);
+  if (activeItem) return activeItem;
+  // 2. Secondary: Item matching registry.activeSymbol
+  if (registry.activeSymbol && registry.items[registry.activeSymbol]) {
+    return registry.items[registry.activeSymbol];
+  }
+  // 3. Fallback: First opened item
+  return Object.values(registry.items).find((item) => item.isOpened) || null;
+}
+
+async function syncSelectedStockDetail(registry: StockRegistryState) {
+  const activeItem = getCurrentlyActiveStock(registry);
+  const selectedStockTitleEl = document.getElementById('selected-stock-title');
+  const selectedStockBadgesEl = document.getElementById('selected-stock-badges');
+  const symbolEl = document.getElementById('stat-symbol');
+
+  if (!activeItem) {
+    if (selectedStockTitleEl) selectedStockTitleEl.textContent = '---';
+    if (selectedStockBadgesEl) selectedStockBadgesEl.innerHTML = '';
+    if (symbolEl) symbolEl.textContent = '---';
+    return;
+  }
+
+  const activeSymbol = activeItem.symbol;
+  const activeCtx = activeItem.chartContexts[0];
+  const timeframe = activeCtx?.timeframe || 'D';
+  const defaultExchange = activeItem.sources.includes('TRADINGVIEW') ? 'US' : 'VN';
+  const exchange = activeItem.exchange || defaultExchange;
+  const compositeKey = activeCtx?.compositeKey || registry.activeCompositeKey || buildChartCompositeKey(activeSymbol, timeframe, exchange);
+
+  // 1. Update Title Header & Badges
+  if (selectedStockTitleEl) {
+    const tfText = ` • Khung: ${timeframe}`;
+    const exText = exchange ? ` • ${exchange}` : '';
+    selectedStockTitleEl.textContent = `${activeItem.symbol}${exText}${tfText}`;
+  }
+
+  const platformName = activeItem.sources.includes('TRADINGVIEW') ? 'TradingView' : 'FireAnt';
+  if (selectedStockBadgesEl) {
+    selectedStockBadgesEl.innerHTML = activeItem.isActive
+      ? `<span class="badge badge-synced">● Active Chart (${platformName})</span>`
+      : `<span class="badge badge-pane-main">○ Opened (${platformName})</span>`;
+  }
+
+  const platformNameHeaderEl = document.getElementById('platform-name');
+  if (platformNameHeaderEl && platformNameHeaderEl.textContent !== platformName) {
+    platformNameHeaderEl.textContent = platformName;
+  }
+
+  // 2. Update Symbol on Card immediately
+  if (symbolEl && symbolEl.textContent !== activeItem.symbol) {
+    symbolEl.textContent = activeItem.symbol;
+  }
+
+  // 3. If current drawings snapshot ALREADY belongs to this active stock, NEVER wipe it out!
+  if (currentDrawingsSnapshot && currentDrawingsSnapshot.chart?.symbol === activeItem.symbol) {
+    return;
+  }
+
+  // 4. Try to load stored partition snapshot for this active stock
+  try {
+    let storedSnapshot = await StorageRepository.getChartSnapshot(compositeKey);
+    if (!storedSnapshot) {
+      storedSnapshot = await StorageRepository.getChartSnapshotForSymbol(activeItem.symbol);
+    }
+    if (storedSnapshot && storedSnapshot.context.symbol === activeItem.symbol) {
+      renderDrawings({
+        schemaVersion: '1.0',
+        platform: (storedSnapshot.context.platform || activeItem.platform || (activeItem.sources.includes('TRADINGVIEW') ? 'tradingview' : 'fireant')),
+        chart: {
+          symbol: storedSnapshot.context.symbol,
+          exchange: storedSnapshot.context.exchange,
+          timeframe: storedSnapshot.context.timeframe,
+          totalDrawings: storedSnapshot.drawings.length,
+        },
+        drawings: storedSnapshot.drawings,
+        sync: {
+          status: 'synced',
+          lastUpdated: storedSnapshot.extractedAt,
+          totalDrawings: storedSnapshot.drawings.length,
+        },
+      });
+
+      renderIndicators({
+        items: storedSnapshot.indicators || [],
+        totalIndicators: storedSnapshot.indicators?.length || 0,
+        timestamp: storedSnapshot.extractedAt,
+      });
+      return;
+    }
+  } catch (err) {
+    console.warn('[SidePanel] Error reading stored snapshot for active stock:', err);
+  }
+
+  // 5. Fallback: If not in storage and current snapshot is for a DIFFERENT stock, render baseline for active stock
+  if (!currentDrawingsSnapshot || currentDrawingsSnapshot.chart?.symbol !== activeItem.symbol) {
+    renderDrawings({
+      schemaVersion: '1.0',
+      platform: (activeItem.platform || (activeItem.sources.includes('TRADINGVIEW') ? 'tradingview' : 'fireant')),
+      chart: {
+        symbol: activeItem.symbol,
+        exchange: activeItem.exchange,
+        timeframe,
+        totalDrawings: activeCtx?.drawingsCount || 0,
+      },
+      drawings: [],
+      sync: {
+        status: activeItem.isOpened ? 'synced' : 'initializing',
+        lastUpdated: activeItem.lastDetectedAt || Date.now(),
+        totalDrawings: activeCtx?.drawingsCount || 0,
+      },
+    });
+
+    renderIndicators({
+      items: [],
+      totalIndicators: activeCtx?.indicatorsCount || 0,
+      timestamp: activeItem.lastDetectedAt || Date.now(),
+    });
+  }
+}
+
 function renderStockManager(registry: StockRegistryState) {
   if (!registry) return;
   currentRegistryState = registry;
 
   const countEl = document.getElementById('stock-manager-count');
   const listEl = document.getElementById('stock-manager-list');
-  const selectedStockTitleEl = document.getElementById('selected-stock-title');
-  const selectedStockBadgesEl = document.getElementById('selected-stock-badges');
 
   const stocks = getAllStocks(registry);
   const countStr = `${stocks.length} mã`;
   if (countEl && countEl.textContent !== countStr) countEl.textContent = countStr;
 
-  const activeItem = registry.activeSymbol ? registry.items[registry.activeSymbol] : null;
-  if (selectedStockTitleEl) {
-    let nextTitle = '---';
-    if (activeItem) {
-      const activeCtx = activeItem.chartContexts[0];
-      const tfText = activeCtx ? ` • Khung: ${activeCtx.timeframe}` : '';
-      const exText = activeItem.exchange ? ` • ${activeItem.exchange}` : '';
-      nextTitle = `${activeItem.symbol}${exText}${tfText}`;
-    }
-    if (selectedStockTitleEl.textContent !== nextTitle) {
-      selectedStockTitleEl.textContent = nextTitle;
-    }
-  }
+  // Keep CHI TIẾT MÃ synchronized with the active stock
+  syncSelectedStockDetail(registry).catch(() => {});
 
-  if (selectedStockBadgesEl) {
-    const nextBadges = activeItem
-      ? `<span class="badge ${activeItem.isActive ? 'badge-synced' : 'badge-pane-main'}">
-          ${activeItem.isActive ? '● Active' : '○ Opened'}
-        </span>`
-      : '';
-    if (selectedStockBadgesEl.innerHTML !== nextBadges) {
-      selectedStockBadgesEl.innerHTML = nextBadges;
-    }
-  }
+  const activeItem = getCurrentlyActiveStock(registry);
+  const activeSym = currentDrawingsSnapshot?.chart?.symbol || activeItem?.symbol;
 
   if (listEl) {
     let nextHtml = '';
@@ -86,7 +192,7 @@ function renderStockManager(registry: StockRegistryState) {
     } else {
       nextHtml = stocks
         .map((item) => {
-          const isCurrent = item.symbol === registry.activeSymbol;
+          const isCurrent = Boolean(activeSym && item.symbol === activeSym);
           const activeCtx = item.chartContexts[0];
           const drawingsCount = activeCtx ? activeCtx.drawingsCount : 0;
           const indicatorsCount = activeCtx ? activeCtx.indicatorsCount : 0;
@@ -95,7 +201,8 @@ function renderStockManager(registry: StockRegistryState) {
           if (item.isActive) {
             statusBadge = '<span class="badge badge-synced" style="font-size: 10px;">● Active Chart</span>';
           } else if (item.isOpened) {
-            statusBadge = '<span class="badge badge-pane-main" style="font-size: 10px;">○ FireAnt</span>';
+            const platformName = item.sources.includes('TRADINGVIEW') ? 'TradingView' : 'FireAnt';
+            statusBadge = `<span class="badge badge-pane-main" style="font-size: 10px;">○ ${platformName}</span>`;
           } else {
             statusBadge = '<span class="badge" style="background:#334155;color:#94a3b8;font-size:10px;">○ Manual</span>';
           }
@@ -103,7 +210,7 @@ function renderStockManager(registry: StockRegistryState) {
           const borderStyle = isCurrent ? 'border-left: 3px solid #38bdf8; background: #1e293b;' : '';
 
           return `
-            <div class="list-item stock-row" data-symbol="${item.symbol}" style="cursor: pointer; ${borderStyle}">
+            <div class="list-item stock-row" data-symbol="${item.symbol}" style="${borderStyle}">
               <div style="display: flex; align-items: center; gap: 6px;">
                 <span class="tag-symbol">${item.symbol}</span>
                 ${statusBadge}
@@ -126,22 +233,6 @@ function renderStockManager(registry: StockRegistryState) {
       listEl.innerHTML = nextHtml;
       listEl.scrollTop = scrollPos;
 
-      // Attach row click to select active stock
-      listEl.querySelectorAll('.stock-row').forEach((row) => {
-        row.addEventListener('click', (e) => {
-          const target = e.target as HTMLElement;
-          if (target.classList.contains('btn-delete-stock')) return;
-          const symbol = row.getAttribute('data-symbol');
-          if (symbol) {
-            browser.runtime.sendMessage({
-              source: EXTENSION_SOURCE,
-              type: 'SET_ACTIVE_STOCK',
-              payload: { symbol },
-            }).catch(() => {});
-          }
-        });
-      });
-
       // Attach delete button click
       listEl.querySelectorAll('.btn-delete-stock').forEach((btn) => {
         btn.addEventListener('click', (e) => {
@@ -156,6 +247,21 @@ function renderStockManager(registry: StockRegistryState) {
           }
         });
       });
+
+      // Attach row click to select stock
+      listEl.querySelectorAll('.stock-row').forEach((row) => {
+        row.addEventListener('click', (e) => {
+          if ((e.target as HTMLElement).closest('.btn-delete-stock')) return;
+          const symbol = row.getAttribute('data-symbol');
+          if (symbol) {
+            browser.runtime.sendMessage({
+              source: EXTENSION_SOURCE,
+              type: 'SET_ACTIVE_STOCK',
+              payload: { symbol },
+            }).catch(() => {});
+          }
+        });
+      });
     }
   }
 }
@@ -165,6 +271,7 @@ function renderStockManager(registry: StockRegistryState) {
 // ----------------------------------------------------
 function renderDrawings(snapshot: ChartSnapshot) {
   if (!snapshot) return;
+  if (snapshot.chart?.symbol === 'BI' || snapshot.chart?.symbol === 'UNKNOWN') return;
   currentDrawingsSnapshot = snapshot;
 
   const symbolEl = document.getElementById('stat-symbol');
@@ -172,10 +279,23 @@ function renderDrawings(snapshot: ChartSnapshot) {
   const tabCountDrawingsEl = document.getElementById('tab-count-drawings');
   const drawingListEl = document.getElementById('drawing-list');
   const jsonViewerDrawingsEl = document.getElementById('json-viewer-drawings');
+  const selectedStockTitleEl = document.getElementById('selected-stock-title');
+  const selectedStockBadgesEl = document.getElementById('selected-stock-badges');
 
   const symbol = snapshot.chart?.symbol || '---';
   if (symbolEl && symbolEl.textContent !== symbol) {
     symbolEl.textContent = symbol;
+  }
+
+  if (selectedStockTitleEl && symbol !== '---') {
+    const tfText = snapshot.chart?.timeframe ? ` • Khung: ${snapshot.chart.timeframe}` : '';
+    const exText = snapshot.chart?.exchange ? ` • ${snapshot.chart.exchange}` : '';
+    selectedStockTitleEl.textContent = `${symbol}${exText}${tfText}`;
+  }
+
+  if (selectedStockBadgesEl && symbol !== '---') {
+    const platformName = snapshot.platform === 'tradingview' ? 'TradingView' : 'FireAnt';
+    selectedStockBadgesEl.innerHTML = `<span class="badge badge-synced">● Active Chart (${platformName})</span>`;
   }
 
   const total = snapshot.drawings?.length ?? 0;
@@ -187,9 +307,12 @@ function renderDrawings(snapshot: ChartSnapshot) {
   if (drawingListEl) {
     let nextListHtml = '';
     if (!snapshot.drawings || snapshot.drawings.length === 0) {
+      const activeItem = getCurrentlyActiveStock(currentRegistryState);
+      const isTv = snapshot.platform === 'tradingview' || Boolean(activeItem?.sources?.includes('TRADINGVIEW'));
+      const platformName = isTv ? 'TradingView' : 'FireAnt';
       nextListHtml = `
         <div style="color: var(--text-secondary); text-align: center; padding: 12px;">
-          Chưa có hình vẽ nào trên biểu đồ. Hãy thử vẽ trên FireAnt!
+          Chưa có hình vẽ nào trên biểu đồ. Hãy thử vẽ trên ${platformName}!
         </div>
       `;
     } else {
@@ -396,11 +519,11 @@ async function sendSyncRequest(button?: HTMLElement) {
     }).catch(() => {});
   } catch {}
 
-  // 2. Query FireAnt tabs directly and send sync request
+  // 2. Query FireAnt and TradingView tabs directly and send sync request
   try {
     const tabs = await browser.tabs.query({});
-    const fireantTabs = tabs.filter((t) => t.url && t.url.includes('fireant'));
-    for (const tab of fireantTabs) {
+    const chartTabs = tabs.filter((t) => t.url && (t.url.includes('fireant') || t.url.includes('tradingview')));
+    for (const tab of chartTabs) {
       if (tab.id) {
         browser.tabs.sendMessage(tab.id, {
           source: EXTENSION_SOURCE,
@@ -588,7 +711,12 @@ function initSidePanel() {
       .get(['stockRegistry', 'latestSnapshot', 'latestIndicators', 'latestWatchlist', 'globalWatchlist'])
       .then((res: Record<string, unknown>) => {
         if (res.stockRegistry) renderStockManager(res.stockRegistry as StockRegistryState);
-        if (res.latestSnapshot) renderDrawings(res.latestSnapshot as ChartSnapshot);
+        if (res.latestSnapshot) {
+          const snap = res.latestSnapshot as ChartSnapshot;
+          if (snap.chart?.symbol && snap.chart.symbol !== 'BI' && snap.chart.symbol !== 'UNKNOWN') {
+            renderDrawings(snap);
+          }
+        }
         if (res.latestIndicators) renderIndicators(res.latestIndicators as IndicatorsSnapshot);
         if (res.globalWatchlist) {
           renderWatchlist(res.globalWatchlist as WatchlistSnapshot);
@@ -629,6 +757,31 @@ browser.runtime.onMessage.addListener((message: unknown) => {
     renderStockManager(parsed.data.payload as StockRegistryState);
   } else if (parsed.data.type === 'DRAWINGS_SNAPSHOT') {
     renderDrawings(parsed.data.payload as ChartSnapshot);
+  } else if (parsed.data.type === 'ISOLATED_CHART_SNAPSHOT') {
+    const iso = parsed.data.payload as IsolatedChartSnapshot;
+    if (iso?.context?.symbol) {
+      renderDrawings({
+        schemaVersion: '1.0',
+        platform: iso.context.platform || 'fireant',
+        chart: {
+          symbol: iso.context.symbol,
+          exchange: iso.context.exchange,
+          timeframe: iso.context.timeframe,
+          totalDrawings: iso.drawings.length,
+        },
+        drawings: iso.drawings,
+        sync: {
+          status: 'synced',
+          lastUpdated: iso.extractedAt,
+          totalDrawings: iso.drawings.length,
+        },
+      });
+      renderIndicators({
+        items: iso.indicators || [],
+        totalIndicators: iso.indicators?.length || 0,
+        timestamp: iso.extractedAt,
+      });
+    }
   } else if (parsed.data.type === 'INDICATORS_SNAPSHOT') {
     renderIndicators(parsed.data.payload as IndicatorsSnapshot);
   } else if (parsed.data.type === 'WATCHLIST_SNAPSHOT') {
@@ -645,12 +798,15 @@ browser.storage.onChanged.addListener((changes, areaName) => {
   if (changes.stockRegistry?.newValue) {
     renderStockManager(changes.stockRegistry.newValue as StockRegistryState);
   }
+
   if (changes.latestSnapshot?.newValue) {
     renderDrawings(changes.latestSnapshot.newValue as ChartSnapshot);
   }
+
   if (changes.latestIndicators?.newValue) {
     renderIndicators(changes.latestIndicators.newValue as IndicatorsSnapshot);
   }
+
   if (changes.globalWatchlist?.newValue) {
     renderWatchlist(changes.globalWatchlist.newValue as WatchlistSnapshot);
   } else if (changes.latestWatchlist?.newValue) {

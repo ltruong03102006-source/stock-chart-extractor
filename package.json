@@ -12,7 +12,7 @@
     "zip": "wxt zip",
     "zip:firefox": "wxt zip -b firefox",
     "compile": "tsc --noEmit",
-    "test": "tsx tests/test-stock-registry.ts && tsx tests/test-storage-repository.ts && tsx tests/test-export-pipeline.ts",
+    "test": "tsx tests/test-stock-registry.ts && tsx tests/test-storage-repository.ts && tsx tests/test-export-pipeline.ts && tsx tests/test-tradingview-registry.ts && tsx tests/test-tradingview-titles.ts",
     "postinstall": "wxt prepare"
   },
   "devDependencies": {

@@ -37,8 +37,9 @@ export default defineContentScript({
           const snapshot = message.payload as any;
           const drawings = snapshot?.drawings || [];
 
-          // Compute a high-fidelity signature covering ID, points coordinates, and styles
-          const currentSignature = drawings.map((d: any) => {
+          // Compute a high-fidelity signature covering symbol, timeframe, ID, points coordinates, and styles
+          const symTf = `${snapshot?.chart?.symbol || ''}_${snapshot?.chart?.timeframe || ''}:`;
+          const currentSignature = symTf + drawings.map((d: any) => {
             const pts = (d.points || []).map((p: any) => `${p.price !== undefined ? Number(p.price).toFixed(2) : ''}@${p.index ?? p.time ?? ''}`).join(',');
             const st = `${d.style?.linecolor ?? d.style?.color ?? ''}_${d.style?.linewidth ?? ''}_${d.style?.backgroundColor ?? ''}`;
             return `${d.id}:${pts}:${st}:${d.visible}:${d.locked}`;

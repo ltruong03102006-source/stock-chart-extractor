@@ -3,7 +3,7 @@
  * Handles both automatic FireAnt chart discovery and extension manual stock management.
  */
 
-export type StockSource = 'FIREANT' | 'EXTENSION';
+export type StockSource = 'FIREANT' | 'TRADINGVIEW' | 'EXTENSION';
 
 export interface ChartContextSummary {
   chartId: string;
@@ -38,6 +38,9 @@ export interface StockRegistryItem {
 
   /** Creation timestamp */
   createdAt: number;
+
+  /** Platform hosting this chart: 'fireant' or 'tradingview' */
+  platform?: 'fireant' | 'tradingview';
 }
 
 export interface StockRegistryState {
@@ -55,6 +58,7 @@ export interface ChartContextPayload {
   chartId: string;
   compositeKey: string;
   chartsCount?: number;
+  platform?: 'fireant' | 'tradingview';
 }
 
 /**

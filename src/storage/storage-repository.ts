@@ -29,6 +29,21 @@ export class StorageRepository {
   }
 
   /**
+   * Retrieves a chart snapshot by stock symbol across any exchange or timeframe partition
+   */
+  static async getChartSnapshotForSymbol(symbol: string): Promise<IsolatedChartSnapshot | null> {
+    if (!symbol) return null;
+    const cleanSym = symbol.trim().toUpperCase();
+    const all = await this.getAllChartSnapshots();
+    for (const snap of Object.values(all)) {
+      if (snap?.context?.symbol?.toUpperCase() === cleanSym) {
+        return snap;
+      }
+    }
+    return null;
+  }
+
+  /**
    * Deletes a chart snapshot partition
    */
   static async deleteChartSnapshot(compositeKey: string): Promise<void> {

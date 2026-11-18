@@ -15,6 +15,9 @@ export default defineConfig({
     host_permissions: [
       'https://fireant.vn/*',
       'https://*.fireant.vn/*',
+      'https://tradingview.com/*',
+      'https://www.tradingview.com/*',
+      'https://*.tradingview.com/*',
     ],
   },
 });

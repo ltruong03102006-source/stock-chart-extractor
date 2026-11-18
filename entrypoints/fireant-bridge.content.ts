@@ -37,10 +37,36 @@ export default defineContentScript({
         }
       }
 
-      // 2. If in top frame, scan child iframes
+      // 2. If in top frame, scan child iframes prioritizing visible iframes
       if (isTopFrame) {
         try {
           const iframes = Array.from(document.querySelectorAll('iframe'));
+
+          // Priority A: Check visible iframes (the one the user is actively viewing)
+          for (let i = 0; i < iframes.length; i++) {
+            const iframe = iframes[i];
+            if (!iframe) continue;
+            try {
+              if (iframe.offsetWidth === 0 && iframe.offsetHeight === 0) continue;
+              const style = window.getComputedStyle(iframe);
+              if (style.display === 'none' || style.visibility === 'hidden') continue;
+              if (iframe.closest?.('.ant-tabs-tabpane-hidden') || iframe.closest?.('[aria-hidden="true"]')) continue;
+
+              const cw = iframe.contentWindow as any;
+              if (cw) {
+                for (const name of candidateNames) {
+                  if (cw[name] && typeof cw[name].model === 'function') {
+                    return {
+                      widget: cw[name],
+                      location: `visible iframe[${i}]#${iframe.id || 'no-id'} -> contentWindow.${name}`,
+                    };
+                  }
+                } 
+              }
+            } catch {}
+          }
+
+          // Priority B: Any iframe fallback
           for (let i = 0; i < iframes.length; i++) {
             const iframe = iframes[i];
             if (!iframe) continue;
@@ -56,9 +82,7 @@ export default defineContentScript({
                   }
                 }
               }
-            } catch {
-              // Cross-origin iframe or restricted access
-            }
+            } catch {}
           }
         } catch {
           // DOM query error
@@ -84,7 +108,7 @@ export default defineContentScript({
     }
 
     /**
-     * Builds a complete snapshot of all active line tools
+     * Builds a complete snapshot of all active line tools directly from chart model
      */
     function buildSnapshot(): ChartSnapshot {
       let symbol = 'UNKNOWN';
@@ -93,7 +117,10 @@ export default defineContentScript({
 
       try {
         const found = locateChartWidget();
-        const widget = found?.widget || activeChartWidget;
+        if (found?.widget) {
+          activeChartWidget = found.widget;
+        }
+        const widget = activeChartWidget || found?.widget;
         if (widget && typeof widget.model === 'function') {
           const model = widget.model()?.m_model;
           if (model) {
@@ -118,6 +145,12 @@ export default defineContentScript({
       } catch (err) {
         console.error('[Stock Chart Extractor] Error reading chart model:', err);
       }
+
+      if (symbol.includes(':')) {
+        const parts = symbol.split(':');
+        if (parts[1]) symbol = parts[1];
+      }
+      symbol = symbol.trim().toUpperCase();
 
       const sig = computeDrawingsSignature(symbol, timeframe, drawings);
       if (sig !== lastDrawingsSignature) {
@@ -146,12 +179,15 @@ export default defineContentScript({
     let currentGenerationId = 0;
 
     /**
-     * Detects active chart symbol, timeframe, exchange and broadcasts changes
+     * Detects active chart symbol, timeframe, exchange directly from chart model and broadcasts changes
      */
-    function detectAndBroadcastContext() {
+    function detectAndBroadcastContext(force = false) {
       try {
         const found = locateChartWidget();
-        const widget = found?.widget || activeChartWidget;
+        if (found?.widget) {
+          activeChartWidget = found.widget;
+        }
+        const widget = activeChartWidget || found?.widget;
         if (!widget || typeof widget.model !== 'function') return null;
 
         const model = widget.model()?.m_model;
@@ -163,15 +199,15 @@ export default defineContentScript({
 
         if (typeof model.mainSeries === 'function') {
           const ms = model.mainSeries();
-          if (typeof ms.symbol === 'function') {
+          if (typeof ms?.symbol === 'function') {
             const rawSym = ms.symbol();
             if (rawSym) symbol = String(rawSym);
           }
-          if (typeof ms.interval === 'function') {
+          if (typeof ms?.interval === 'function') {
             const rawInt = ms.interval();
             if (rawInt) timeframe = String(rawInt);
           }
-          if (typeof ms.symbolInfo === 'function') {
+          if (typeof ms?.symbolInfo === 'function') {
             const info = ms.symbolInfo();
             if (info?.exchange) exchange = String(info.exchange);
           }
@@ -184,12 +220,15 @@ export default defineContentScript({
         }
 
         const cleanSymbol = symbol.trim().toUpperCase();
-        if (!cleanSymbol || cleanSymbol === 'UNKNOWN') return null;
+        // Guard against invalid/non-stock tickers: must be at least 3 chars and not UNKNOWN or BI
+        if (!cleanSymbol || cleanSymbol === 'UNKNOWN' || cleanSymbol === 'BI' || cleanSymbol.length < 3) return null;
 
-        const compositeKey = `${cleanSymbol}_${exchange.toUpperCase()}_${timeframe.toUpperCase()}`;
+        const cleanExchange = (exchange || 'VN').trim().toUpperCase();
+        const cleanTf = (timeframe || 'D').trim().toUpperCase();
+        const compositeKey = `${cleanSymbol}_${cleanExchange}_${cleanTf}`;
         const chartId = 'chart-0';
 
-        if (compositeKey !== lastContextKey) {
+        if (force || compositeKey !== lastContextKey) {
           currentGenerationId++;
           console.log(`[Stock Chart Extractor][Main World] 🔄 Chart Context Changed: ${lastContextKey || 'none'} -> ${compositeKey} (gen: ${currentGenerationId})`);
           lastContextKey = compositeKey;
@@ -200,21 +239,29 @@ export default defineContentScript({
               type: 'CHART_CONTEXT_CHANGED',
               payload: {
                 symbol: cleanSymbol,
-                exchange: exchange.toUpperCase(),
-                timeframe: timeframe.toUpperCase(),
+                exchange: cleanExchange,
+                timeframe: cleanTf,
                 chartId,
                 compositeKey,
+                platform: 'fireant',
               },
               timestamp: Date.now(),
             },
             '*'
           );
+
+          // Immediately force re-broadcast snapshots for the new stock
+          setTimeout(() => {
+            broadcastSnapshot(true);
+            broadcastIsolatedSnapshot(true);
+            broadcastIndicators(true);
+          }, 60);
         }
 
         return {
           symbol: cleanSymbol,
-          exchange: exchange.toUpperCase(),
-          timeframe: timeframe.toUpperCase(),
+          exchange: cleanExchange,
+          timeframe: cleanTf,
           chartId,
           compositeKey,
         };
@@ -236,7 +283,10 @@ export default defineContentScript({
 
       try {
         const found = locateChartWidget();
-        const widget = found?.widget || activeChartWidget;
+        if (found?.widget) {
+          activeChartWidget = found.widget;
+        }
+        const widget = activeChartWidget || found?.widget;
         if (widget && typeof widget.model === 'function') {
           const model = widget.model()?.m_model;
           if (model) {
@@ -693,6 +743,36 @@ export default defineContentScript({
           broadcastWatchlist();
         }
       });
+
+      // Listen for click events anywhere on the page (e.g. switching chart tabs or symbol search)
+      window.addEventListener('click', () => {
+        [80, 250, 600, 1200].forEach((delay) => {
+          setTimeout(() => {
+            detectAndBroadcastContext();
+          }, delay);
+        });
+      }, true);
+    }
+
+    /**
+     * Checks whether the current frame is visually active and displayed to the user
+     */
+    function isFrameActive(): boolean {
+      if (isTopFrame) return true;
+      try {
+        if (window.innerWidth === 0 || window.innerHeight === 0) return false;
+        if (document.documentElement && (document.documentElement.clientWidth === 0 || document.documentElement.clientHeight === 0)) return false;
+        if (window.frameElement) {
+          const el = window.frameElement as HTMLElement;
+          if (el.offsetWidth === 0 || el.offsetHeight === 0) return false;
+          if (el.closest?.('.ant-tabs-tabpane-hidden') || el.closest?.('[aria-hidden="true"]')) return false;
+          const style = window.getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden') return false;
+        }
+        return true;
+      } catch {
+        return true;
+      }
     }
 
     /**
@@ -706,6 +786,9 @@ export default defineContentScript({
       if (syncIntervalStarted) return;
       syncIntervalStarted = true;
       setInterval(() => {
+        if (!isFrameActive()) {
+          return;
+        }
         detectAndBroadcastContext();
         broadcastSnapshot();
         broadcastIsolatedSnapshot();

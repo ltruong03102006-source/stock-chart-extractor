@@ -89,7 +89,7 @@ export interface ExportedStockItem {
 export const ExportedStockItemSchema = z.object({
   symbol: z.string().min(1),
   exchange: z.string().nullable(),
-  sources: z.array(z.enum(['FIREANT', 'EXTENSION'])).min(1),
+  sources: z.array(z.enum(['FIREANT', 'TRADINGVIEW', 'EXTENSION'])).min(1),
   isOpened: z.boolean(),
   isActive: z.boolean(),
   lastDetectedAt: z.string(),

@@ -36,7 +36,7 @@ export const SyncStatusSchema = z.enum([
 
 export const ChartSnapshotSchema = z.object({
   schemaVersion: z.literal('1.0').default('1.0'),
-  platform: z.literal('fireant').default('fireant'),
+  platform: z.enum(['fireant', 'tradingview']).default('fireant'),
   chart: ChartInfoSchema,
   drawings: z.array(DrawingObjectSchema),
   sync: z.object({
@@ -117,12 +117,13 @@ export const ChartContextSummarySchema = z.object({
 export const StockRegistryItemSchema = z.object({
   symbol: z.string().min(1),
   exchange: z.string().optional(),
-  sources: z.array(z.enum(['FIREANT', 'EXTENSION'])),
+  sources: z.array(z.enum(['FIREANT', 'TRADINGVIEW', 'EXTENSION'])),
   isOpened: z.boolean().default(false),
   isActive: z.boolean().default(false),
   chartContexts: z.array(ChartContextSummarySchema).default([]),
   lastDetectedAt: z.number().default(() => Date.now()),
   createdAt: z.number().default(() => Date.now()),
+  platform: z.enum(['fireant', 'tradingview']).optional(),
 });
 
 export const StockRegistryStateSchema = z.object({
@@ -140,6 +141,7 @@ export const ChartContextPayloadSchema = z.object({
   chartId: z.string().default('chart-0'),
   compositeKey: z.string(),
   chartsCount: z.number().optional(),
+  platform: z.enum(['fireant', 'tradingview']).optional(),
 });
 
 export const IsolatedChartSnapshotSchema = z.object({
@@ -175,6 +177,7 @@ export const ExtensionMessageSchema = z.object({
     'REMOVE_MANUAL_STOCK',
     'SET_ACTIVE_STOCK',
     'REQUEST_STOCK_REGISTRY',
+    'REFRESH_TRADINGVIEW_DRAWINGS',
     'PING',
     'PONG',
   ]),
