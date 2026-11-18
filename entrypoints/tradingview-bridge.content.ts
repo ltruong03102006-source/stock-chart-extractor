@@ -16,7 +16,6 @@ export default defineContentScript({
     let lastBroadcastSignature = '';
     let lastBroadcastContextKey = '';
     let activeChartId = '';
-    let layoutFetched = false;
 
     /**
      * Unwraps TradingView Property values (e.g. property.value() or raw value) safely
@@ -43,7 +42,7 @@ export default defineContentScript({
         let timeframe = 'D';
         let chartId = 'chart-0';
 
-        // 1. URL Path & Query Parameters (Highest priority for Layout ID and Exchange)
+        // 1. URL Path & Query Parameters
         try {
           const u = new URL(window.location.href);
           const pathParts = u.pathname.split('/').filter(Boolean);
@@ -172,7 +171,6 @@ export default defineContentScript({
 
           if (chartId !== activeChartId) {
             activeChartId = chartId;
-            layoutFetched = false;
             cachedDrawings = [];
             lastBroadcastSignature = '';
           }
@@ -213,6 +211,13 @@ export default defineContentScript({
         }
         if (src.points && (Array.isArray(src.points) || typeof src.points === 'function')) {
           if (src.properties || typeof src.properties === 'function' || src.state || src.id) {
+            return true;
+          }
+        }
+        // Check if points array has price/time properties
+        if (Array.isArray(src.points) && src.points.length > 0) {
+          const pt = src.points[0];
+          if (pt && (pt.price !== undefined || pt.time !== undefined || pt.time_t !== undefined)) {
             return true;
           }
         }
@@ -491,7 +496,7 @@ export default defineContentScript({
     }
 
     /**
-     * Process parsed layout JSON payload (from LocalStorage, Fetch, or REST API)
+     * Process parsed layout JSON payload (from LocalStorage, Fetch, etc.)
      */
     function processLayoutData(data: any) {
       if (!data || typeof data !== 'object') return;
@@ -528,80 +533,207 @@ export default defineContentScript({
     }
 
     /**
-     * Inspects React Fiber on an element safely looking for active tool props
+     * Inspects a candidate object (such as a chart engine model, pane, or tool instance) safely
      */
-    function scanElementFiberForTools(el: Element): any[] {
-      if (!el) return [];
-      const found: any[] = [];
-      try {
-        const keys = Object.keys(el);
-        const fiberKey = keys.find((k) => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
-        if (!fiberKey) return found;
+    function inspectCandidate(obj: any, visited = new Set(), depth = 0): any[] {
+      if (!obj || typeof obj !== 'object' || depth > 4 || visited.has(obj)) return [];
+      visited.add(obj);
 
-        let curr = (el as any)[fiberKey];
-        let depth = 0;
-        while (curr && depth < 20) {
-          depth++;
-          const checkProps = (props: any) => {
-            if (!props || typeof props !== 'object') return;
-            const propNames = ['tool', 'source', 'lineTool', 'item', 'activeTool', 'drawing', 'model'];
-            for (const name of propNames) {
-              const val = props[name];
-              if (val && typeof val === 'object') {
-                if (isCandidateLineTool(val)) {
-                  found.push(val);
+      const tools: any[] = [];
+
+      try {
+        // Direct line tool
+        if (isCandidateLineTool(obj)) {
+          tools.push(obj);
+          return tools;
+        }
+
+        // 1. Check allLineTools()
+        if (typeof obj.allLineTools === 'function') {
+          try {
+            const res = obj.allLineTools();
+            if (Array.isArray(res) && res.length > 0) return res;
+          } catch {}
+        }
+
+        // 2. Check lineTools()
+        if (typeof obj.lineTools === 'function') {
+          try {
+            const res = obj.lineTools();
+            if (Array.isArray(res) && res.length > 0) return res;
+          } catch {}
+        } else if (Array.isArray(obj.lineTools) && obj.lineTools.length > 0) {
+          return obj.lineTools;
+        }
+
+        // 3. Check m_model
+        if (obj.m_model && typeof obj.m_model === 'object') {
+          const sub = inspectCandidate(obj.m_model, visited, depth + 1);
+          if (sub.length > 0) return sub;
+        }
+
+        // 4. Check model()
+        if (typeof obj.model === 'function') {
+          try {
+            const m = obj.model();
+            if (m && typeof m === 'object') {
+              const sub = inspectCandidate(m, visited, depth + 1);
+              if (sub.length > 0) return sub;
+            }
+          } catch {}
+        }
+
+        // 5. Check panes()
+        if (typeof obj.panes === 'function') {
+          try {
+            const panes = obj.panes();
+            if (Array.isArray(panes)) {
+              for (const p of panes) {
+                if (!p) continue;
+                if (typeof p.sources === 'function') {
+                  try {
+                    const s = p.sources();
+                    if (Array.isArray(s)) {
+                      for (const item of s) {
+                        if (isCandidateLineTool(item)) tools.push(item);
+                      }
+                    }
+                  } catch {}
+                }
+                if (Array.isArray(p.sources)) {
+                  for (const item of p.sources) {
+                    if (isCandidateLineTool(item)) tools.push(item);
+                  }
+                }
+                if (Array.isArray(p._sources)) {
+                  for (const item of p._sources) {
+                    if (isCandidateLineTool(item)) tools.push(item);
+                  }
                 }
               }
             }
-          };
+          } catch {}
+        }
 
-          if (curr.memoizedProps) checkProps(curr.memoizedProps);
-          if (curr.memoizedState) checkProps(curr.memoizedState);
+        // 6. Check _panes array
+        if (Array.isArray(obj._panes)) {
+          for (const p of obj._panes) {
+            if (!p) continue;
+            if (Array.isArray(p.sources)) {
+              for (const item of p.sources) {
+                if (isCandidateLineTool(item)) tools.push(item);
+              }
+            }
+            if (Array.isArray(p._sources)) {
+              for (const item of p._sources) {
+                if (isCandidateLineTool(item)) tools.push(item);
+              }
+            }
+          }
+        }
 
-          curr = curr.return;
+        // 7. Check lineToolsAndGroupsState
+        if (typeof obj.lineToolsAndGroupsState === 'function') {
+          try {
+            const st = obj.lineToolsAndGroupsState();
+            if (Array.isArray(st?.lineTools)) return st.lineTools;
+          } catch {}
+        } else if (Array.isArray(obj.lineToolsAndGroupsState?.lineTools)) {
+          return obj.lineToolsAndGroupsState.lineTools;
+        }
+
+        // 8. Check direct sources array
+        if (Array.isArray(obj.sources)) {
+          for (const item of obj.sources) {
+            if (isCandidateLineTool(item)) tools.push(item);
+          }
         }
       } catch {}
-      return found;
+
+      return tools;
     }
 
     /**
-     * Direct Fetch of Layout via TradingView Public Layout API
+     * Inspects React Fiber on an element safely looking for active chart model, panes, or tool instances
      */
-    function fetchChartLayout(layoutId: string) {
-      if (!layoutId || layoutId === 'chart-0') return;
-      try {
-        fetch(`https://layout.tradingview.com/v1/charts/${layoutId}`, { credentials: 'include' })
-          .then((res) => {
-            if (!res.ok) return null;
-            return res.json();
-          })
-          .then((json) => {
-            if (json) {
-              processLayoutData(json);
+    function scanReactFiberTree(): any[] {
+      const candidates: Element[] = [];
+
+      // Priority elements
+      document.querySelectorAll(
+        '.chart-gui-wrapper, .chart-container, [class*="chart-gui-wrapper"], [class*="chart-container-border"], [class*="floating-toolbar"], [data-name="drawing-toolbar"], #overlap-manager-root, .chart-page'
+      ).forEach((el) => candidates.push(el));
+
+      const foundTools: any[] = [];
+
+      for (const el of candidates) {
+        try {
+          const keys = Object.keys(el);
+          const fiberKey = keys.find((k) => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+          if (!fiberKey) continue;
+
+          let curr = (el as any)[fiberKey];
+          let depth = 0;
+          while (curr && depth < 25) {
+            depth++;
+
+            // 1. Check class component instance (stateNode)
+            if (curr.stateNode && typeof curr.stateNode === 'object') {
+              const res = inspectCandidate(curr.stateNode);
+              if (res.length > 0) return res;
             }
-          })
-          .catch(() => {});
-      } catch {}
+
+            // 2. Check function component hooks (useRef, useState)
+            let hook = curr.memoizedState;
+            let hookCount = 0;
+            while (hook && hookCount < 20) {
+              hookCount++;
+              if (hook.memoizedState && typeof hook.memoizedState === 'object') {
+                if (hook.memoizedState.current) {
+                  const res = inspectCandidate(hook.memoizedState.current);
+                  if (res.length > 0) return res;
+                }
+                const res = inspectCandidate(hook.memoizedState);
+                if (res.length > 0) return res;
+              }
+              hook = hook.next;
+            }
+
+            // 3. Check memoizedProps
+            if (curr.memoizedProps && typeof curr.memoizedProps === 'object') {
+              const p = curr.memoizedProps;
+              const propNames = ['tool', 'source', 'lineTool', 'item', 'activeTool', 'drawing', 'model', 'chart', 'chartModel', 'panes'];
+              for (const name of propNames) {
+                if (p[name]) {
+                  const res = inspectCandidate(p[name]);
+                  if (res.length > 0) return res;
+                }
+              }
+            }
+
+            curr = curr.return;
+          }
+        } catch {}
+      }
+
+      return foundTools;
     }
 
     /**
-     * Full Sync Cycle across all runtime paths (Completely resilient, no unhandled exceptions)
+     * Full Sync Cycle across all runtime paths
      */
     function syncDrawingsFromRuntime(force = false) {
       try {
         // 1. Detect context first
-        const ctx = detectAndBroadcastTradingViewContext(force);
+        detectAndBroadcastTradingViewContext(force);
 
         const collected: any[] = [];
 
-        // 2. Scan Floating Toolbar React Fiber (Captures the active drawing in real-time)
+        // 2. Scan React Fiber Tree (Comprehensive search covering chart container, useRef hooks, and floating toolbar)
         try {
-          const activeToolbar = document.querySelector(
-            '[class*="floating-toolbar"], [data-name="drawing-toolbar"], #overlap-manager-root div[class*="toolbar-"]'
-          );
-          if (activeToolbar) {
-            const tools = scanElementFiberForTools(activeToolbar);
-            if (tools.length > 0) collected.push(...tools);
+          const fiberTools = scanReactFiberTree();
+          if (fiberTools.length > 0) {
+            collected.push(...fiberTools);
           }
         } catch {}
 
@@ -610,22 +742,14 @@ export default defineContentScript({
           scanLocalStorage();
         } catch {}
 
-        // 4. Fetch layout from API if layoutId is available and not yet loaded
-        if (!layoutFetched && ctx?.chartId && ctx.chartId !== 'chart-0') {
-          layoutFetched = true;
-          fetchChartLayout(ctx.chartId);
-        }
-
-        // 5. Merge any collected tools into cache
+        // 4. Merge any collected tools into cache
         if (collected.length > 0) {
           const normalized = collected.map(normalizeTradingViewLineTool).filter((d): d is DrawingObject => Boolean(d));
           if (normalized.length > 0) {
             mergeAndBroadcastDrawings(normalized, force);
           }
         }
-      } catch {
-        // Silent catch prevents DevTools pause on caught exceptions
-      }
+      } catch {}
     }
 
     // ====================================================
@@ -662,7 +786,7 @@ export default defineContentScript({
         const response = await originalFetch.apply(this, args);
         try {
           const url = typeof args[0] === 'string' ? args[0] : (args[0] as Request)?.url || '';
-          if (/layout\.tradingview\.com|\/v1\/charts|charts-storage|api\/v1\/charts/i.test(url)) {
+          if (/charts|layout|drawings/i.test(url) && !url.includes('layout.tradingview.com')) {
             response.clone().json().then((json) => {
               if (json) processLayoutData(json);
             }).catch(() => {});
@@ -690,7 +814,8 @@ export default defineContentScript({
                 const el = node as HTMLElement;
                 if (el.matches?.('[class*="floating-toolbar"], [data-name="drawing-toolbar"]') ||
                     el.querySelector?.('[class*="floating-toolbar"], [data-name="drawing-toolbar"]')) {
-                  setTimeout(() => syncDrawingsFromRuntime(true), 50);
+                  setTimeout(() => syncDrawingsFromRuntime(true), 60);
+                  setTimeout(() => syncDrawingsFromRuntime(true), 300);
                 }
               }
             });
@@ -701,7 +826,7 @@ export default defineContentScript({
 
       // User interaction listeners on chart canvas (drawing finished, point dragged, etc.)
       window.addEventListener('mouseup', () => {
-        setTimeout(() => syncDrawingsFromRuntime(), 100);
+        setTimeout(() => syncDrawingsFromRuntime(), 120);
         setTimeout(() => syncDrawingsFromRuntime(), 500);
       }, true);
 
@@ -739,7 +864,7 @@ export default defineContentScript({
     setInterval(() => {
       detectAndBroadcastTradingViewContext();
       syncDrawingsFromRuntime();
-    }, 2000);
+    }, 1500);
 
     // Expose global diagnosis helper for Chrome DevTools Console
     (window as any).__STOCK_CHART_EXTRACTOR_TV__ = {
@@ -747,7 +872,6 @@ export default defineContentScript({
       getContext: () => detectAndBroadcastTradingViewContext(true),
       scan: () => syncDrawingsFromRuntime(true),
       processLayout: (data: any) => processLayoutData(data),
-      fetchLayout: (id: string) => fetchChartLayout(id),
       normalize: normalizeTradingViewLineTool,
     };
 
